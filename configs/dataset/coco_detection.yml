@@ -1,0 +1,43 @@
+task: detection
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox']
+
+num_classes: 21
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: ~/Downloads/lmo/lmo2coco_train_amodal/train2017/
+    ann_file: ~/Downloads/lmo/lmo2coco_train_amodal/annotations/instances_train2017.json
+    return_masks: True
+    return_depth: False
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  num_workers: 8
+  drop_last: True 
+  collate_fn:
+    type: BatchImageCollateFunction
+  pin_memory: True
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: ~/Downloads/lmo/lmo2coco_train_amodal/val2017/
+    ann_file: ~/Downloads/lmo/lmo2coco_train_amodal/annotations/instances_val2017.json
+    return_masks: True
+    return_depth: False
+    transforms:
+      type: Compose
+      ops: ~ 
+  shuffle: False
+  num_workers: 8
+  drop_last: False
+  collate_fn:
+    type: BatchImageCollateFunction
+  pin_memory: True

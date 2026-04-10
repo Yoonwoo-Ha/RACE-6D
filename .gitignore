@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# PyTorch checkpoints & models
+*.pth
+*.onnx
+*.pt
+*.bin
+
+# Training output
+output/
+pretrain/
+
+# Logs
+*.log
+*_log.txt
+
+# Reference repos (not part of this project)
+reference/
+lib/
+scripts/
+docs/
+
+# BOP results
+bop_results/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+!sub/test_kpt.ipynb
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Ruff cache
+.ruff_cache/
+
+# Claude Code / OMC internal state
+.omc/
+.omx/
+.claude/
+.analysis/
+.sisyphus/
+
+# OS
+.DS_Store
+Thumbs.db
+
+AGENTS.md
+bop_log.txt
+CLAUDE.md
+bop.py
+test.py

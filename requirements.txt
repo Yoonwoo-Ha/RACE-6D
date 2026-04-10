@@ -1,0 +1,15 @@
+torch>=2.0
+torchvision
+numpy
+scipy
+scikit-learn
+opencv-python
+Pillow
+matplotlib
+pandas
+seaborn
+PyYAML
+tensorboard
+pycocotools
+packaging
+sympy

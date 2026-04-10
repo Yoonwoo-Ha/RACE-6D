@@ -1,0 +1,22 @@
+category2name:
+    1: '1' # master_chef_can
+    2: '2' # cracker_box
+    3: '3' # sugar_box
+    4: '4' # tomato_soup_can
+    5: '5' # mustard_bottle
+    6: '6' # tuna_fish_can
+    7: '7' # pudding_box
+    8: '8' # gelatin_box
+    9: '9' # potted_meat_can
+    10: '10' # banana
+    11: '11' # pitcher_base
+    12: '12' # bleach_cleanser
+    13: '13' # bowl
+    14: '14' # mug
+    15: '15' # power_drill
+    16: '16' # wood_block
+    17: '17' # scissors
+    18: '18' # large_marker
+    19: '19' # large_clamp
+    20: '20' # extra_large_clamp
+    21: '21' # foam_brick

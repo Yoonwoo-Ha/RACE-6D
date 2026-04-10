@@ -1,0 +1,145 @@
+__include__: [
+  '../../dataset/coco_detection.yml',
+  '../../runtime.yml',
+  '../include/dataloader.yml',
+  '../include/optimizer.yml',
+  '../include/race6d_r50vd_best.yml',
+]
+
+output_dir: ./output/race6d_r50vd_lmo_rgb
+coco_path: ~/Downloads/lmo/
+category_file: ./configs/race6d/include/lmo2coco_category.yml
+num_classes: 8
+# eval_spatial_size: [768, 1024]
+eval_spatial_size: [480, 640]
+
+RACE6D:
+  backbone: PResNet
+
+PResNet:
+  depth: 50
+  variant: d
+  freeze_at: -1
+  return_idx: [1, 2, 3]
+  num_stages: 4
+  freeze_norm: False
+  pretrained: True
+
+HybridEncoder:
+  in_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  hidden_dim: 256
+  depth_mult: 0.67
+  enc_act: quick_gelu
+
+RACE6DTransformer_DQE:
+  feat_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  num_levels: 3
+  num_points: [3, 6, 3]
+  num_layers: 3
+  vis_enc: True
+  num_queries: 20
+  eval_idx: -1
+  activation: quick_gelu
+  mlp_act: quick_gelu
+
+RACE6DPostProcessor:
+  num_top_queries: 20
+  vis_enc: True
+  remap_mscoco_category: False
+
+RACE6DCriterion_addr:
+  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 0.01}
+  losses: ['mal', 'boxes', 'pose', 'keypoint']
+  alpha: 0.75
+  gamma_pos: 1.0
+  gamma_neg: 2.0
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    alpha: 0.25
+    gamma: 2.0
+    iou_threshold: 0.0
+
+optimizer:
+  type: AdamW
+  params:
+    - 
+      params: '^(?=.*(?:norm|bn)).*$'
+      weight_decay: 0.
+    -
+      params: '^(?=.*bbox_head).*$'
+      lr: 0.00002
+    -
+      params: '^(?=.*score_head).*$'
+      lr: 0.0001
+      
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+epoches: 40
+
+lr_scheduler:
+  type: FlatCosineAnnealingLR
+  T_max: 40
+  lr_gamma: 0.5
+  warmup_iter: 1000
+  flat_epochs: 5
+  no_aug_epochs: 15
+  group_flat_epochs:
+    1: 0
+    # 2: 10
+
+train_dataloader:
+  dataset:
+    img_folder: ~/Downloads/lmo/lmo2coco_train_pbr_amodal/train2017/
+    ann_file: ~/Downloads/lmo/lmo2coco_train_pbr_amodal/annotations/instances_train2017.json
+    transforms:
+      ops:
+        - {type: FilterSmallBoxLowVis, min_size: 10, min_visib: 0.1}
+        - {type: RandomCoarseDropout}
+        - {type: ColorJitter} #ok
+        - {type: RandomHSVAdjust} #ok
+        - {type: RandomSharpen} #ok
+        - {type: RandomMotionBlur} #ok
+        - {type: RandomGaussianBlur} #ok
+        - {type: RandomGaussianNoise} #ok
+        - {type: RandomAdditionalNoise} #ok
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        name: stop_epoch
+        epoch: [0, 25]
+        ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
+    return_masks: True
+    remap_mscoco_category: True
+    return_depth: False
+    category_file: ./configs/race6d/include/lmo2coco_category.yml
+    coco_path: ~/Downloads/lmo/
+    need_aligned: False
+  collate_fn:
+    scales: ~
+  total_batch_size: 16
+
+val_dataloader:
+  dataset:
+    img_folder: ~/Downloads/lmo/lmo2coco_test_eval_amodal/val2017/
+    ann_file: ~/Downloads/lmo/lmo2coco_test_eval_amodal/annotations/instances_val2017.json
+    transforms:
+      ops:
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+    return_masks: True
+    remap_mscoco_category: True
+    return_depth: False
+    category_file: ./configs/race6d/include/lmo2coco_category.yml
+    coco_path: ~/Downloads/lmo/
+    need_aligned: False
+  total_batch_size: 1

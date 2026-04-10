@@ -1,0 +1,41 @@
+train_dataloader:
+  dataset:
+    return_masks: True
+    transforms:
+      ops:
+        - {type: RandomCoarseDropout}
+        - {type: ColorJitter} #ok
+        - {type: RandomHSVAdjust} #ok
+        - {type: RandomSharpen} #ok
+        - {type: RandomMotionBlur} #ok
+        - {type: RandomGaussianBlur} #ok
+        - {type: RandomGaussianNoise} #ok
+        - {type: RandomAdditionalNoise} #ok
+        - {type: ConvertPose, coco_path: ~/Downloads/lmo/}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        name: stop_epoch
+        epoch: 71  # epoch in [71, ~) stop `ops`
+        ops: [ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise, RandomRotateExpand, RandomCoarseDropout]
+  
+  collate_fn:
+    type: BatchImageCollateFunction
+    scales: ~
+    stop_epoch: 0 # epoch in [71, ~) stop `multiscales`
+
+  shuffle: True
+  total_batch_size: 32 # total batch size equals to 16 (4 * 4)
+  num_workers: 4
+
+
+val_dataloader:
+  dataset: 
+    transforms:
+      ops:
+        - {type: ConvertPose, coco_path: ~/Downloads/lmo/} 
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}  
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+  shuffle: False
+  total_batch_size: 32
+  num_workers: 4
