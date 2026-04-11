@@ -1740,13 +1740,17 @@ class ZoomPoseAugmentation(nn.Module):
         zoom_range: Optional[Tuple[float, float]] = None,
         p: float = 1.0,
         fill_value: Union[int, Tuple[int, int, int]] = 114,
+        background_dir: Optional[str] = None,
     ) -> None:
         """
         Args:
             zoom_factor: 고정 zoom factor (zoom_range가 None일 때 사용)
             zoom_range: 랜덤 zoom factor 범위 (min, max)
             p: 적용 확률
-            fill_value: zoom out 시 padding 색상
+            fill_value: zoom out 시 padding 색상 (background_dir=None일 때만 사용)
+            background_dir: 주어지면 zoom-out 여백을 해당 디렉터리의 random
+                natural image로 채움. Reflect padding처럼 가짜 물체를 만들지
+                않으면서 gray fill의 non-realistic 티도 없앰.
         """
         super().__init__()
         self.zoom_factor = zoom_factor
@@ -1757,6 +1761,37 @@ class ZoomPoseAugmentation(nn.Module):
             if isinstance(fill_value, tuple)
             else (fill_value, fill_value, fill_value)
         )
+        self._background_dir = (
+            os.path.expanduser(background_dir) if background_dir else None
+        )
+        self._background_images: Optional[List[str]] = None
+
+    def _load_backgrounds(self) -> List[str]:
+        from pathlib import Path
+        exts = {".jpg", ".jpeg", ".png", ".bmp"}
+        if not self._background_dir:
+            return []
+        return [
+            str(p) for p in Path(self._background_dir).iterdir()
+            if p.suffix.lower() in exts
+        ]
+
+    def _sample_background(self, h: int, w: int) -> Optional[np.ndarray]:
+        """Return a random VOC background resized to (h, w) as uint8 RGB ndarray.
+
+        Lazily loads the background list on first use. Returns None if the
+        directory is empty or not configured.
+        """
+        if self._background_dir is None:
+            return None
+        if self._background_images is None:
+            self._background_images = self._load_backgrounds()
+        if not self._background_images:
+            return None
+        bg_path = self._background_images[np.random.randint(len(self._background_images))]
+        bg_img = PILImage.open(bg_path).convert("RGB")
+        bg_np = np.array(bg_img.resize((w, h)))
+        return bg_np
 
     def _get_zoom_factor(self) -> float:
         """zoom factor 결정"""
@@ -1843,16 +1878,33 @@ class ZoomPoseAugmentation(nn.Module):
             resized = resized[:pad_bottom, :]
             pad_bottom = 0
 
-        # padding
-        zoomed = cv2.copyMakeBorder(
-            resized,
-            pad_top,
-            pad_bottom,
-            pad_left,
-            pad_right,
-            cv2.BORDER_CONSTANT,
-            value=self.fill_value,
-        )
+        # Fill strategy: random VOC background (if configured AND this is an
+        # RGB image) or constant gray. Masks (2D) and other non-RGB arrays must
+        # fall back to constant fill (0 for masks is handled by caller passing
+        # fill_value=0 implicitly via cv2.copyMakeBorder default broadcast).
+        is_rgb = img.ndim == 3 and img.shape[2] == 3
+        bg = self._sample_background(h, w) if is_rgb else None
+        if bg is not None:
+            rh, rw = resized.shape[:2]
+            rh = min(rh, h - pad_top)
+            rw = min(rw, w - pad_left)
+            canvas = bg.copy()
+            if rh > 0 and rw > 0:
+                canvas[pad_top:pad_top + rh, pad_left:pad_left + rw] = resized[:rh, :rw]
+            zoomed = canvas
+        else:
+            # Masks (2D uint8) need fill 0 (=no object). RGB non-bg path uses
+            # the configured gray fill_value.
+            fill_for_pad = 0 if not is_rgb else self.fill_value
+            zoomed = cv2.copyMakeBorder(
+                resized,
+                pad_top,
+                pad_bottom,
+                pad_left,
+                pad_right,
+                cv2.BORDER_CONSTANT,
+                value=fill_for_pad,
+            )
 
         # 크기 보정 (rounding으로 인한 1-2픽셀 차이)
         if zoomed.shape[0] != h or zoomed.shape[1] != w:
@@ -2738,9 +2790,21 @@ class FilterSmallBoxLowVis(nn.Module):
                 return (image, target, dataset_info)
             return (image, target)
 
+        # Explicit whitelist of per-object fields so we never collide with
+        # fixed-shape metadata like orig_size ([W, H], shape [2]) when a sample
+        # happens to have the same number of GTs as the metadata length.
+        per_object_keys = {
+            "boxes", "masks", "full_masks", "amodal_masks",
+            "labels", "poses", "cam_K", "visibility",
+            "area", "iscrowd",
+        }
         filtered = {}
         for k, v in target.items():
-            if isinstance(v, (torch.Tensor, BoundingBoxes, Mask, Pose)) and v.shape[0] == len(keep):
+            if (
+                k in per_object_keys
+                and isinstance(v, (torch.Tensor, BoundingBoxes, Mask, Pose))
+                and v.shape[0] == len(keep)
+            ):
                 if isinstance(v, BoundingBoxes):
                     filtered[k] = BoundingBoxes(v.data[keep], format=v.format, canvas_size=v.canvas_size)
                 elif isinstance(v, Mask):
@@ -2912,7 +2976,9 @@ class DepthAugment(nn.Module):
         speckle_prob: float = 0.6,
         speckle_thickness: int = 1,
         speckle_swap_prob: float = 0.4,
-        # (4) Object clustered holes (mask 위 edge-biased)
+        # (4) Object clustered holes (visibility-aware: TLESS real sensor 실측)
+        # 낮은 visibility (occluded sliver) 일수록 real sensor는 depth hole이 더 많음
+        # (Pearson corr = -0.59, 100vs100 분석 기반).
         obj_hole_prob: float = 0.7,
         obj_n_clusters_min: int = 1,
         obj_n_clusters_max: int = 5,
@@ -3082,10 +3148,41 @@ class DepthAugment(nn.Module):
         out[ys, xs] = depth[nys, nxs]
         return out
 
-    def _obj_clustered_holes(self, depth, masks, rng):
-        """Per-mask clustered hole stamping.
+    @staticmethod
+    def _target_hole_frac(vis, rng):
+        """Empirical hole fraction as a function of visibility (TLESS real).
 
-        Uses cv2.erode (C, multithreaded) instead of scipy.binary_erosion.
+        실측 (1000 val images):
+          vis 0.1-0.2: mean 0.59, fully_hole 22.4%
+          vis 0.2-0.4: mean 0.34, fully_hole  6.7%
+          vis 0.4-0.6: mean 0.13, fully_hole  1.7%
+          vis 0.6-0.8: mean 0.05, fully_hole  0.2%
+          vis 0.8-1.0: mean 0.02, fully_hole  0.0%
+        """
+        if vis < 0.2:
+            if rng.rand() < 0.22:
+                return 1.0
+            return rng.uniform(0.3, 0.9)
+        if vis < 0.4:
+            if rng.rand() < 0.07:
+                return 1.0
+            return rng.uniform(0.1, 0.6)
+        if vis < 0.6:
+            return rng.uniform(0.02, 0.3)
+        if vis < 0.8:
+            return rng.uniform(0.01, 0.15)
+        return rng.uniform(0.0, 0.05)
+
+    def _obj_clustered_holes(self, depth, masks, visibilities, rng):
+        """Per-mask clustered hole stamping, visibility-aware.
+
+        Real TLESS sensor 실측을 기반으로:
+          - 낮은 visibility (heavily occluded sliver) 물체는 depth hole이 많음
+          - visibility가 높으면 거의 온전한 depth
+        target_hole_frac(visibility)로 mask당 목표 hole 비율을 결정하고,
+        cluster 기반 stamping으로 그 양만큼 hole을 채움.
+
+        vis < 0.2 의 22%는 전체가 hole이라 valid_mask 전체를 0으로 short-circuit.
         """
         out = depth.copy()
         H, W = depth.shape
@@ -3093,28 +3190,46 @@ class DepthAugment(nn.Module):
         border_mask = _depth_aug_image_border_mask(H, W, self.obj_image_edge_margin)
         not_border = (~border_mask).astype(np.uint8)
         kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        for mask in masks:
+        size_lo, size_hi = self.obj_cluster_size_range
+        for idx, mask in enumerate(masks):
             vu8 = mask.astype(np.uint8) & not_border
-            if vu8.sum() < 20:
+            mask_area = int(vu8.sum())
+            if mask_area < 20:
                 continue
+            vis = float(visibilities[idx]) if idx < len(visibilities) else 1.0
+
+            target_frac = self._target_hole_frac(vis, rng)
+            # Full hole shortcut: 전체 visible mask를 통째로 0으로
+            if target_frac >= 0.999:
+                out[vu8.astype(bool)] = 0.0
+                continue
+            target_px = int(round(mask_area * target_frac))
+            if target_px < size_lo:
+                continue
+
             valid_mask = vu8.astype(bool)
             interior_u8 = cv2.erode(vu8, kernel, iterations=3)
             boundary = valid_mask & ~interior_u8.astype(bool)
             mask_ys, mask_xs = np.where(valid_mask)
             boundary_ys, boundary_xs = np.where(boundary)
-            n_clusters = rng.randint(self.obj_n_clusters_range[0],
-                                     self.obj_n_clusters_range[1] + 1)
-            for _ in range(n_clusters):
+
+            # Budget-based stamping: 누적 hole이 target_px에 도달할 때까지 cluster 생성.
+            # cluster 크기는 원래 범위 유지 (실측 cluster shape과 일치).
+            budget = target_px
+            max_stamps = max(self.obj_n_clusters_range[1] * 4, 8)  # safety cap
+            stamps = 0
+            while budget > size_lo and stamps < max_stamps:
                 if rng.rand() < self.obj_edge_bias and len(boundary_ys) > 0:
                     i = rng.randint(len(boundary_ys))
                     cy, cx = int(boundary_ys[i]), int(boundary_xs[i])
                 else:
                     i = rng.randint(len(mask_ys))
                     cy, cx = int(mask_ys[i]), int(mask_xs[i])
-                target_px = rng.randint(self.obj_cluster_size_range[0],
-                                        self.obj_cluster_size_range[1] + 1)
+                this_px = min(budget, rng.randint(size_lo, size_hi + 1))
                 _depth_aug_stamp_ellipse(out, valid_mask, yy, xx, cy, cx,
-                                         target_px, (0.5, 2.0), rng)
+                                         this_px, (0.5, 2.0), rng)
+                budget -= this_px
+                stamps += 1
         return out
 
     def _bg_clustered_holes(self, depth, masks, rng):
@@ -3160,11 +3275,42 @@ class DepthAugment(nn.Module):
             return inputs if len(inputs) > 1 else inputs[0]
 
         depth = depth_t.squeeze(0).numpy().astype(np.float32)  # [H, W] in [0, 1]
+
+        # Resize depth to match the transform-target resolution (after Resize
+        # transform) so downstream _extract_masks doesn't need to re-resize
+        # masks. Target resolution is inferred from masks (preferred — already
+        # at the Resize target) or image shape as fallback.
+        target_hw = None
+        masks_obj = target.get("masks")
+        if masks_obj is not None and hasattr(masks_obj, "shape") and len(masks_obj.shape) >= 2:
+            target_hw = (int(masks_obj.shape[-2]), int(masks_obj.shape[-1]))
+        elif hasattr(image, "size"):  # PIL.Image: .size = (W, H)
+            target_hw = (int(image.size[1]), int(image.size[0]))
+        elif hasattr(image, "shape") and len(image.shape) >= 2:
+            target_hw = (int(image.shape[-2]), int(image.shape[-1]))
+        if target_hw is not None and depth.shape != target_hw:
+            depth = cv2.resize(
+                depth,
+                (target_hw[1], target_hw[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
         H, W = depth.shape
         rng = np.random  # use global numpy random state
 
-        # Extract and resize masks to depth resolution (if needed)
+        # Masks are already at (H, W); _extract_masks will just convert to bool.
         masks = self._extract_masks(target, H, W)
+        # Per-mask visibility (annotation value). Default 1.0 if missing.
+        vis_t = target.get("visibility")
+        if vis_t is None:
+            visibilities = [1.0] * len(masks)
+        else:
+            if isinstance(vis_t, torch.Tensor):
+                visibilities = vis_t.detach().cpu().tolist()
+            else:
+                visibilities = list(np.asarray(vis_t).tolist())
+            # Pad/truncate to match masks (safety against len mismatch)
+            if len(visibilities) < len(masks):
+                visibilities = visibilities + [1.0] * (len(masks) - len(visibilities))
 
         # (1) Zero point fill — 기존 hole을 N(0, fill_std)로 채움
         if rng.rand() < self.fill_prob:
@@ -3182,9 +3328,9 @@ class DepthAugment(nn.Module):
         if masks and rng.rand() < self.speckle_prob:
             depth = self._boundary_speckle(depth, masks, rng)
 
-        # (4) Object mask clustered holes
+        # (4) Object mask clustered holes (visibility-aware)
         if masks and rng.rand() < self.obj_hole_prob:
-            depth = self._obj_clustered_holes(depth, masks, rng)
+            depth = self._obj_clustered_holes(depth, masks, visibilities, rng)
 
         # (5) Background clustered holes
         if rng.rand() < self.bg_hole_prob:

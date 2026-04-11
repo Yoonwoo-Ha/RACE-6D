@@ -10,7 +10,7 @@ output_dir: ./output/race6d_r50vd_tless_rgbd
 coco_path: ~/Downloads/tless/
 category_file: ./configs/race6d/include/tless2coco_category.yml
 num_classes: 30
-eval_spatial_size: [576, 768] # h w (모델 입력 크기, pos embed/anchors)
+eval_spatial_size: [480, 640] # h w (모델 입력 크기, pos embed/anchors)
 group_detr: 1
 
 RACE6D:
@@ -48,7 +48,7 @@ RACE6DTransformer_DQE:
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
-  num_denoising: 100      # DN query 수 (0이면 비활성)
+  num_denoising: 50      # DN query 수 (0이면 비활성)
   label_noise_ratio: 0.5
   box_noise_scale: 1.0
 
@@ -58,7 +58,7 @@ RACE6DPostProcessor:
   remap_mscoco_category: False
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
+  weight_dict: {loss_mal: 2, loss_bbox: 2, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
   losses: ['mal', 'boxes', 'pose', 'keypoint']
   alpha: 1.0
   gamma_pos: 1.5
@@ -66,7 +66,7 @@ RACE6DCriterion_addr:
 
   matcher:
     type: HungarianMatcher
-    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    weight_dict: {cost_class: 2, cost_bbox: 2, cost_giou: 2}
     alpha: 0.25
     gamma: 2.0
     iou_threshold: 0.25
@@ -74,6 +74,9 @@ RACE6DCriterion_addr:
 optimizer:
   type: AdamW
   params:
+    -
+      params: '^(?=.*backbone)(?!.*norm).*$'
+      lr: 0.00005
     - 
       params: '^(?=.*(?:norm|bn)).*$'
       weight_decay: 0.
@@ -95,7 +98,8 @@ lr_scheduler:
   flat_epochs: 5
   no_aug_epochs: 15
   group_flat_epochs:
-    1: 0
+    0: 0
+    2: 0
 
 train_dataloader:
   dataset:
@@ -103,7 +107,7 @@ train_dataloader:
     ann_file: ~/Downloads/tless/tless2coco_train_pbr_amodal/annotations/instances_train2017.json
     transforms:
       ops:
-        - {type: Resize, size: [576, 768]}
+        - {type: Resize, size: [480, 640]}
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: DepthAugment}
         - {type: RandomCoarseDropout}
@@ -119,7 +123,7 @@ train_dataloader:
       policy:
         name: stop_epoch
         epoch: [0, 25]
-        ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
+        ops: [DepthAugment, RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
     return_masks: True
     remap_mscoco_category: True
     return_depth: True
@@ -136,8 +140,7 @@ val_dataloader:
     ann_file: ~/Downloads/tless/tless2coco_test_eval_amodal/annotations/instances_val2017.json
     transforms:
       ops:
-        - {type: Resize, size: [576, 768]}
-        - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
+        - {type: Resize, size: [480, 640]}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
     return_masks: True

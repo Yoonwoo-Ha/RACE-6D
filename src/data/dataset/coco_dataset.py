@@ -42,7 +42,6 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         return_masks=False,
         remap_mscoco_category=False,
         return_depth=False,
-        use_depth=False,
         category_file=None,
         coco_path=None,
         need_aligned=False,

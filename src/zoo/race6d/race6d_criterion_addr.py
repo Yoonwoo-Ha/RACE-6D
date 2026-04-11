@@ -645,8 +645,22 @@ class RACE6DCriterion_addr(nn.Module):
         target_poses = torch.cat([
             t['poses'][i] for t, (_, i) in zip(targets, indices)
         ], dim=0)
-        target_rotations = target_poses[:, 3:].reshape(-1, 3, 3)
         target_classes = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+
+        # Empty-match short-circuit — must come BEFORE any per-instance indexing
+        # (e.g., cam_K[0]) which would fail on a zero-length tensor. This path
+        # is hit when Hungarian matching returns no valid pairs (early training
+        # with strict iou_threshold, or degenerate batches).
+        if len(target_classes) == 0:
+            zero = torch.tensor(0.0, device=self.device, requires_grad=True)
+            zero_m = torch.tensor(0.0, device=self.device)
+            return {
+                'loss_pose': zero,
+                'metric_tx_error': zero_m, 'metric_ty_error': zero_m,
+                'metric_tz_error': zero_m, 'metric_rot_error': zero_m,
+            }
+
+        target_rotations = target_poses[:, 3:].reshape(-1, 3, 3)
 
         # cam_K from targets (per-instance)
         cam_K = torch.cat([t['cam_K'][j] for t, (_, j) in zip(targets, indices)], dim=0)
@@ -659,15 +673,6 @@ class RACE6DCriterion_addr(nn.Module):
         src_rotations = outputs['pred_rotations'][idx].reshape(-1, 3, 3)
         src_boxes = outputs['pred_boxes'][idx].detach()
         src_translations = self._c2t_pred(outputs['pred_translations'][idx], cam_K, src_boxes, orig_w, orig_h) / 1000.0  # mm → m
-
-        if len(target_classes) == 0:
-            zero = torch.tensor(0.0, device=self.device, requires_grad=True)
-            zero_m = torch.tensor(0.0, device=self.device)
-            return {
-                'loss_pose': zero,
-                'metric_tx_error': zero_m, 'metric_ty_error': zero_m,
-                'metric_tz_error': zero_m, 'metric_rot_error': zero_m,
-            }
 
         tx_error_mm = (src_translations[:, 0] - target_translations[:, 0]).abs().mean() * 1000.0
         ty_error_mm = (src_translations[:, 1] - target_translations[:, 1]).abs().mean() * 1000.0

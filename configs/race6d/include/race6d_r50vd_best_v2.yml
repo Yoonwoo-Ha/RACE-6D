@@ -55,7 +55,7 @@ RACE6Dv2PostProcessor:
   remap_mscoco_category: False
 
 RACE6Dv2Criterion:
-  weight_dict: {loss_mal: 1, loss_keypoints: 1, loss_pose: 0.01}
+  weight_dict: {loss_mal: 1, loss_keypoints: 1, loss_pose: 5}
   enc_weight_dict: {loss_mal: 1}
   losses: ['mal', 'keypoint', 'pose']
   alpha: 0.75

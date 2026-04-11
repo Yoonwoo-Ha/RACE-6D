@@ -46,6 +46,9 @@ RACE6DTransformer_DQE:
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
+  num_denoising: 100      # DN query 수 (0이면 비활성)                                                                                                                                                                                                                                       
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
 
 RACE6DPostProcessor:
   num_top_queries: 100
@@ -53,10 +56,10 @@ RACE6DPostProcessor:
   remap_mscoco_category: False
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 0.01}
+  weight_dict: {loss_mal: 0.5, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
   losses: ['mal', 'boxes', 'pose', 'keypoint']
   alpha: 0.75
-  gamma_pos: 1.0
+  gamma_pos: 1.5
   gamma_neg: 2.0
 
   matcher:
@@ -86,6 +89,7 @@ lr_scheduler:
   warmup_iter: 100
   flat_epochs: 5
   no_aug_epochs: 15
+  group_flat_epochs:
 
 train_dataloader:
   dataset:

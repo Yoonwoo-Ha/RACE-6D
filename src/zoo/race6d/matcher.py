@@ -45,6 +45,11 @@ class HungarianMatcher(torch.nn.Module):
         self.cost_class = weight_dict['cost_class']
         self.cost_bbox = weight_dict.get('cost_bbox', 5.0)
         self.cost_giou = weight_dict.get('cost_giou', 2.0)
+        # Optional: log-space tz cost. 0 → 기존 동작.
+        # Use case: datasets with wide tz distribution mismatch between
+        # train and eval (e.g. TUDL). Helps the matcher pick queries whose
+        # predicted depth matches GT, giving stronger tz supervision signal.
+        self.cost_tz = weight_dict.get('cost_tz', 0.0)
 
         self.use_focal_loss = use_focal_loss
         self.alpha = alpha
@@ -86,10 +91,26 @@ class HungarianMatcher(torch.nn.Module):
         tgt_bbox_xyxy = box_cxcywh_to_xyxy(tgt_bbox)
         cost_giou = -generalized_box_iou(out_bbox_xyxy, tgt_bbox_xyxy)  # [B*Nq, B*Nt]
 
+        # ---- log-space tz cost (optional) ----
+        # pred_translations: (rx, ry, log_tz) with log_tz in log(meters).
+        # GT poses store tz in mm → convert to log(m) for apples-to-apples.
+        # Using log space keeps the cost magnitude small and stable, since
+        # exp() amplification only happens at metric recovery time.
+        cost_tz = None
+        if self.cost_tz > 0 and 'pred_translations' in outputs:
+            pred_log_tz = outputs['pred_translations'][..., 2].flatten(0, 1)  # [B*Nq]
+            gt_tz_mm = torch.cat([v['poses'][:, 2] for v in targets])          # [B*Nt]
+            gt_log_tz = torch.log(torch.clamp(gt_tz_mm / 1000.0, min=1e-3))
+            cost_tz = torch.cdist(
+                pred_log_tz.unsqueeze(-1), gt_log_tz.unsqueeze(-1), p=1
+            )  # [B*Nq, B*Nt]
+
         # ---- Total cost ----
         C = (self.cost_class * cost_class
              + self.cost_bbox * cost_bbox
              + self.cost_giou * cost_giou)  # [B*Nq, B*Nt]
+        if cost_tz is not None:
+            C = C + self.cost_tz * cost_tz
 
         # ---- Group-wise split and solve assignment ----
         sizes = [len(v["labels"]) for v in targets]
