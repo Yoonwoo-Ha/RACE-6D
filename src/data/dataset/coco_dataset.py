@@ -228,9 +228,14 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
             img_width = img_info["width"]
             img_height = img_info["height"]
 
-            # 1. (필터 제거) ignore=True / iscrowd=1 / visibility<0.1 필터 모두 해제.
-            # pose 유효성(tz>0)만 이미지 유효성 판정에 사용.
-            valid_anns = list(anns)
+            # 1. ignore=True / iscrowd=1 ann은 학습/평가 대상 아님 (BOP convention).
+            #    이런 ann은 보통 객체가 카메라에 비현실적으로 가까워 (tz < diameter/2)
+            #    Z<0 점이 발생하는 합성 잡음. 데이터 진입 단에서 미리 제외.
+            #    visibility<0.1 필터는 FilterSmallBoxLowVis transform이 담당.
+            valid_anns = [
+                ann for ann in anns
+                if not ann.get("ignore", False) and ann.get("iscrowd", 0) == 0
+            ]
 
             if len(valid_anns) == 0:
                 continue
@@ -513,12 +518,35 @@ class ConvertCocoPolysToMask(object):
                 ]
                 full_masks = convert_coco_poly_to_mask(full_segmentations, h, w)
 
-        # 4. tz > 0 체크 (pose 유효성만 검증, visibility/ignore 필터는 제거)
-        visibility = torch.tensor(
-            [obj.get("visibility", 1.0) for obj in anno], dtype=torch.float32
+        # 4. visibility 처리 + tz > 0 체크
+        # annotation에 visibility 있으면 그대로, 없으면 mask 기반으로 계산
+        raw_visibility = []
+        for i, obj in enumerate(anno):
+            vis = obj.get("visibility", None)
+            if vis is not None:
+                raw_visibility.append(float(vis))
+            else:
+                if self.return_masks and full_masks is not None:
+                    vis_area = float(masks[i].sum())
+                    amodal_area = float(full_masks[i].sum())
+                    vis = vis_area / max(amodal_area, 1.0)
+                else:
+                    vis = 1.0
+                raw_visibility.append(vis)
+        visibility = torch.tensor(raw_visibility, dtype=torch.float32)
+
+        # ignore=True / iscrowd=1 ann 제외 (BOP convention: 평가 대상 아님 +
+        # 보통 tz<diameter/2 인 합성 잡음 → projection에서 Z<0 발생).
+        not_ignore = torch.tensor(
+            [not obj.get("ignore", False) for obj in anno], dtype=torch.bool
+        )
+        not_crowd = torch.tensor(
+            [obj.get("iscrowd", 0) == 0 for obj in anno], dtype=torch.bool
         )
         eps = 1e-6
-        keep = (poses[:, 2] > eps) & torch.isfinite(poses[:, 2])
+        keep = (
+            (poses[:, 2] > eps) & torch.isfinite(poses[:, 2]) & not_ignore & not_crowd
+        )
 
         boxes = boxes[keep]
         poses = poses[keep]

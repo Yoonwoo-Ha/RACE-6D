@@ -212,11 +212,13 @@ class PResNet(nn.Module):
 
         if pretrained:
             if isinstance(pretrained, bool) or 'http' in pretrained:
-                state = torch.hub.load_state_dict_from_url(donwload_url[depth], map_location='cpu')
+                src = donwload_url[depth]
+                state = torch.hub.load_state_dict_from_url(src, map_location='cpu')
+                print(f'Load PResNet{depth} state_dict from URL: {src}')
             else:
                 state = torch.load(pretrained, map_location='cpu')
+                print(f'Load PResNet{depth} state_dict from LOCAL: {pretrained}')
             self.load_state_dict(state)
-            print(f'Load PResNet{depth} state_dict')
 
     def _freeze_parameters(self, m: nn.Module):
         for p in m.parameters():

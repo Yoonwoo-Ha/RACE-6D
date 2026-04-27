@@ -29,6 +29,7 @@ docs/
 
 # BOP results
 bop_results/
+bop_eval_results/
 
 # Jupyter
 .ipynb_checkpoints/

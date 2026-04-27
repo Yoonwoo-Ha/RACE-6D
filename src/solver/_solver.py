@@ -64,6 +64,12 @@ class BaseSolver(object):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.writer = cfg.writer
 
+        # Save resolved config snapshot per run (timestamped)
+        if dist_utils.is_main_process():
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            with (self.output_dir / f'config_{ts}.txt').open('w') as f:
+                f.write(cfg.__repr__())
+
         if self.writer:
             atexit.register(self.writer.close)
             if dist_utils.is_main_process():

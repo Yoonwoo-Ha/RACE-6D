@@ -237,9 +237,8 @@ def get_pose_denoising_training_group(
     models_info,
     mscoco_label2category,
     num_classes,
-    num_queries,        # normal query 수 (group_detr 적용 후, attn_mask 크기 결정용)
+    num_queries,        # normal query 수 (attn_mask 크기 결정용)
     class_embed,        # nn.Embedding(num_classes+1, hidden_dim)
-    group_detr=1,
     img_w=640,
     img_h=480,
     num_denoising=100,
@@ -362,18 +361,6 @@ def get_pose_denoising_training_group(
         else:
             attn_mask[max_gt_num * 2 * i: max_gt_num * 2 * (i + 1), max_gt_num * 2 * (i + 1): num_denoising] = True
             attn_mask[max_gt_num * 2 * i: max_gt_num * 2 * (i + 1), :max_gt_num * 2 * i] = True
-
-    # Group DETR isolation in normal queries
-    if group_detr > 1:
-        N_per_group = num_queries // group_detr
-        for gi in range(group_detr):
-            for gj in range(group_detr):
-                if gi != gj:
-                    si = num_denoising + gi * N_per_group
-                    ei = num_denoising + (gi + 1) * N_per_group
-                    sj = num_denoising + gj * N_per_group
-                    ej = num_denoising + (gj + 1) * N_per_group
-                    attn_mask[si:ei, sj:ej] = True
 
     dn_meta = {
         "dn_positive_idx": dn_positive_idx,

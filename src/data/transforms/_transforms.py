@@ -1749,8 +1749,7 @@ class ZoomPoseAugmentation(nn.Module):
             p: 적용 확률
             fill_value: zoom out 시 padding 색상 (background_dir=None일 때만 사용)
             background_dir: 주어지면 zoom-out 여백을 해당 디렉터리의 random
-                natural image로 채움. Reflect padding처럼 가짜 물체를 만들지
-                않으면서 gray fill의 non-realistic 티도 없앰.
+                natural image로 채움.
         """
         super().__init__()
         self.zoom_factor = zoom_factor
@@ -1766,6 +1765,7 @@ class ZoomPoseAugmentation(nn.Module):
         )
         self._background_images: Optional[List[str]] = None
 
+
     def _load_backgrounds(self) -> List[str]:
         from pathlib import Path
         exts = {".jpg", ".jpeg", ".png", ".bmp"}
@@ -1777,11 +1777,6 @@ class ZoomPoseAugmentation(nn.Module):
         ]
 
     def _sample_background(self, h: int, w: int) -> Optional[np.ndarray]:
-        """Return a random VOC background resized to (h, w) as uint8 RGB ndarray.
-
-        Lazily loads the background list on first use. Returns None if the
-        directory is empty or not configured.
-        """
         if self._background_dir is None:
             return None
         if self._background_images is None:
@@ -1792,7 +1787,6 @@ class ZoomPoseAugmentation(nn.Module):
         bg_img = PILImage.open(bg_path).convert("RGB")
         bg_np = np.array(bg_img.resize((w, h)))
         return bg_np
-
     def _get_zoom_factor(self) -> float:
         """zoom factor 결정"""
         if self.zoom_range is not None:
@@ -1878,10 +1872,7 @@ class ZoomPoseAugmentation(nn.Module):
             resized = resized[:pad_bottom, :]
             pad_bottom = 0
 
-        # Fill strategy: random VOC background (if configured AND this is an
-        # RGB image) or constant gray. Masks (2D) and other non-RGB arrays must
-        # fall back to constant fill (0 for masks is handled by caller passing
-        # fill_value=0 implicitly via cv2.copyMakeBorder default broadcast).
+        # Fill strategy: background image (RGB only) or constant fill
         is_rgb = img.ndim == 3 and img.shape[2] == 3
         bg = self._sample_background(h, w) if is_rgb else None
         if bg is not None:
@@ -1893,17 +1884,10 @@ class ZoomPoseAugmentation(nn.Module):
                 canvas[pad_top:pad_top + rh, pad_left:pad_left + rw] = resized[:rh, :rw]
             zoomed = canvas
         else:
-            # Masks (2D uint8) need fill 0 (=no object). RGB non-bg path uses
-            # the configured gray fill_value.
             fill_for_pad = 0 if not is_rgb else self.fill_value
             zoomed = cv2.copyMakeBorder(
-                resized,
-                pad_top,
-                pad_bottom,
-                pad_left,
-                pad_right,
-                cv2.BORDER_CONSTANT,
-                value=fill_for_pad,
+                resized, pad_top, pad_bottom, pad_left, pad_right,
+                cv2.BORDER_CONSTANT, value=fill_for_pad,
             )
 
         # 크기 보정 (rounding으로 인한 1-2픽셀 차이)
@@ -1996,16 +1980,10 @@ class ZoomPoseAugmentation(nn.Module):
         boxes_data[:, 2] = boxes_data[:, 2].clamp(0, img_w)
         boxes_data[:, 3] = boxes_data[:, 3].clamp(0, img_h)
 
-        # bbox 크기 필터 (가로/세로 10px 이상)
-        keep = (
-            (boxes_data[:, 2] - boxes_data[:, 0] >= 10)
-            & (boxes_data[:, 3] - boxes_data[:, 1] >= 10)
-        )
-
         new_boxes = BoundingBoxes(
             boxes_data, format=box_format, canvas_size=(img_h, img_w)
         )
-        return new_boxes, keep
+        return new_boxes
 
     def _zoom_masks(
         self,
@@ -2092,11 +2070,9 @@ class ZoomPoseAugmentation(nn.Module):
         # 이미지 변환
         transformed_image = self._zoom_image(image, zoom_factor, cx, cy)
 
-        # target 변환
+        # target 변환 (필터링/visibility 재계산은 후속 FilterSmallBoxLowVis가 담당)
         transformed_target = target.copy()
-        keep = None
 
-        # poses 변환
         if "poses" in target:
             poses = target["poses"]
             if isinstance(poses, Pose):
@@ -2106,13 +2082,11 @@ class ZoomPoseAugmentation(nn.Module):
             else:
                 transformed_target["poses"] = self._zoom_poses(poses, zoom_factor)
 
-        # boxes 변환
         if "boxes" in target:
-            transformed_target["boxes"], keep = self._zoom_boxes(
+            transformed_target["boxes"] = self._zoom_boxes(
                 target["boxes"], zoom_factor, cx, cy, img_w, img_h
             )
 
-        # masks 변환
         if "masks" in target:
             transformed_target["masks"] = self._zoom_masks(
                 target["masks"], zoom_factor, cx, cy, img_w, img_h
@@ -2122,73 +2096,6 @@ class ZoomPoseAugmentation(nn.Module):
             transformed_target["full_masks"] = self._zoom_masks(
                 target["full_masks"], zoom_factor, cx, cy, img_w, img_h
             )
-
-        # mask 기반 visibility 체크 (visib_mask / full_mask >= 0.1)
-        if "masks" in transformed_target and "full_masks" in transformed_target:
-            masks_np = transformed_target["masks"].numpy() if torch.is_tensor(transformed_target["masks"]) else np.array(transformed_target["masks"])
-            full_np = transformed_target["full_masks"].numpy() if torch.is_tensor(transformed_target["full_masks"]) else np.array(transformed_target["full_masks"])
-            visib_areas = np.count_nonzero(masks_np > 0, axis=(1, 2)).astype(np.float32)
-            full_areas = np.count_nonzero(full_np > 0, axis=(1, 2)).astype(np.float32)
-            vis_ratios = np.divide(visib_areas, full_areas, out=np.zeros_like(visib_areas), where=full_areas > 0)
-            mask_keep = torch.from_numpy(vis_ratios >= 0.1)
-
-            # modal bbox 최소 크기 체크 (visib_mask 기준)
-            for idx in range(len(masks_np)):
-                if not mask_keep[idx]:
-                    continue
-                vys, vxs = np.where(masks_np[idx] > 0)
-                if len(vys) == 0 or (vxs.max() - vxs.min()) < 5 or (vys.max() - vys.min()) < 5:
-                    mask_keep[idx] = False
-
-            if keep is not None:
-                keep = keep & mask_keep
-            else:
-                keep = mask_keep
-
-        # keep mask 적용 (유효하지 않은 객체 필터링)
-        if keep is not None and not keep.all():
-            # 모든 물체가 사라지면 원본 반환
-            if not keep.any():
-                return inputs if len(inputs) > 1 else inputs[0]
-
-            if "boxes" in transformed_target:
-                transformed_target["boxes"] = BoundingBoxes(
-                    transformed_target["boxes"].data[keep],
-                    format=transformed_target["boxes"].format,
-                    canvas_size=(img_h, img_w),
-                )
-            if "poses" in transformed_target:
-                poses_data = (
-                    transformed_target["poses"].data
-                    if isinstance(transformed_target["poses"], Pose)
-                    else transformed_target["poses"]
-                )
-                transformed_target["poses"] = Pose(poses_data[keep])
-            if "masks" in transformed_target:
-                transformed_target["masks"] = transformed_target["masks"][keep]
-            if "full_masks" in transformed_target:
-                transformed_target["full_masks"] = transformed_target["full_masks"][
-                    keep
-                ]
-            if "labels" in target:
-                transformed_target["labels"] = target["labels"][keep]
-            if "cam_K" in target:
-                if (
-                    isinstance(target["cam_K"], torch.Tensor)
-                    and len(target["cam_K"].shape) > 1
-                ):
-                    transformed_target["cam_K"] = target["cam_K"][keep]
-            if "visibility" in target:
-                transformed_target["visibility"] = target["visibility"][keep]
-
-        # visibility 재계산 (zoom 후 mask 기반)
-        if "masks" in transformed_target and "full_masks" in transformed_target:
-            m_np = transformed_target["masks"].numpy() if torch.is_tensor(transformed_target["masks"]) else np.array(transformed_target["masks"])
-            f_np = transformed_target["full_masks"].numpy() if torch.is_tensor(transformed_target["full_masks"]) else np.array(transformed_target["full_masks"])
-            v_areas = np.count_nonzero(m_np > 0, axis=(1, 2)).astype(np.float32)
-            f_areas = np.count_nonzero(f_np > 0, axis=(1, 2)).astype(np.float32)
-            new_vis = np.divide(v_areas, f_areas, out=np.zeros_like(v_areas), where=f_areas > 0)
-            transformed_target["visibility"] = torch.tensor(new_vis, dtype=torch.float32)
 
         # 결과 반환
         if dataset_info is not None:
@@ -2707,17 +2614,213 @@ class RandomTransformAug(nn.Module):
 
 @register()
 class FilterSmallBoxLowVis(nn.Module):
-    """Modal bbox (visib_mask 기반) 최소 크기 + 가시성 필터.
+    """Modal bbox 최소 크기 + dynamic visibility 필터.
 
-    Geometric augmentation 이후에 적용하여:
-    - modal bbox w 또는 h가 min_size 미만인 물체 제거
-    - visib_fract가 min_visib 미만인 물체 제거 (GDRNPP: 0.3)
+    Augmentation 이후 위치에 두면 zoom/crop/dropout으로 가려진 결과까지 반영해
+    필터링된다. Visibility는 다음 우선순위로 계산:
+
+      1) **Dynamic** (권장): PLY 모델에서 FPS 샘플한 점들을 현재 pose+cam_K로
+         이미지에 투영하여 visible mask 안에 들어간 비율. coco_path /
+         category_file이 주어졌을 때 활성화.
+      2) Amodal mask 면적 비율 (`amodal_masks` / `full_masks`).
+      3) Annotation의 `visibility` 필드 (BOP 정적 값).
+
+    `coco_path`/`category_file`이 비어있거나 PLY 로딩 실패 시 자동으로 (2)→(3)
+    fallback. 따라서 ignore=True 분기를 dataset에서 제거해도 동등한 supervision
+    필터링이 학습 단에서 보장된다.
     """
 
-    def __init__(self, min_size: int = 5, min_visib: float = 0.0):
+    def __init__(
+        self,
+        min_size: int = 5,
+        min_visib: float = 0.0,
+        coco_path: Optional[str] = None,
+        category_file: Optional[str] = None,
+        num_fps_points: int = 1000,
+    ):
         super().__init__()
         self.min_size = min_size
         self.min_visib = min_visib
+        self.num_fps_points = int(num_fps_points)
+
+        # {label_id (post-remap, 0-indexed): np.ndarray [N, 3] in mm}
+        self._fps_cache: Dict[int, np.ndarray] = {}
+        # {label_id: diameter in mm} — for tz<d/2 pre-filter (object intersects
+        # near plane → some FPS pts have Z<0, projection unstable).
+        self._diameter_cache: Dict[int, float] = {}
+        if coco_path and category_file:
+            self._load_fps_models(coco_path, category_file, self.num_fps_points)
+            self._load_diameters(coco_path, category_file)
+
+    def _load_fps_models(self, coco_path: str, category_file: str, num_pts: int) -> None:
+        try:
+            import yaml
+            import hashlib
+        except Exception as exc:
+            print(f"[FilterSmallBoxLowVis] dynamic vis disabled (import failed: {exc})")
+            return
+
+        coco_path_exp = os.path.expanduser(coco_path)
+        cat_path = os.path.expanduser(category_file)
+        models_dir = os.path.join(coco_path_exp, "models")
+        if not (os.path.isdir(models_dir) and os.path.isfile(cat_path)):
+            print("[FilterSmallBoxLowVis] dynamic vis disabled (missing models dir or category file)")
+            return
+
+        # Disk cache: key on (models_dir abs path, category_file abs path, num_pts).
+        # PLY 파일 mtime까지 합쳐 변경 감지.
+        ply_paths = sorted(
+            [os.path.join(models_dir, fn) for fn in os.listdir(models_dir) if fn.endswith(".ply")]
+        )
+        ply_mtimes = ",".join(f"{os.path.basename(p)}:{os.path.getmtime(p):.0f}" for p in ply_paths)
+        key = f"{os.path.abspath(models_dir)}|{os.path.abspath(cat_path)}|{num_pts}|{ply_mtimes}"
+        digest = hashlib.sha1(key.encode()).hexdigest()[:16]
+        cache_dir = os.path.expanduser("~/.cache/race6d/fps_models")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"fps_{digest}.pt")
+
+        if os.path.isfile(cache_path):
+            try:
+                self._fps_cache = torch.load(cache_path, weights_only=False)
+                print(
+                    f"[FilterSmallBoxLowVis] dynamic vis enabled: loaded {len(self._fps_cache)} "
+                    f"models from cache ({cache_path})"
+                )
+                return
+            except Exception as exc:
+                print(f"[FilterSmallBoxLowVis] cache load failed ({exc}), recomputing...")
+
+        try:
+            import open3d as o3d  # type: ignore[import-not-found]
+            from pytorch3d.ops import sample_farthest_points  # type: ignore[import-not-found]
+        except Exception as exc:
+            print(f"[FilterSmallBoxLowVis] dynamic vis disabled (import failed: {exc})")
+            return
+
+        with open(cat_path, "r") as f:
+            cat = yaml.safe_load(f).get("category2name", {})
+
+        loaded = 0
+        for label_id, cat_id in enumerate(cat.keys()):
+            ply_path = os.path.join(models_dir, f"obj_{int(cat_id):06d}.ply")
+            if not os.path.isfile(ply_path):
+                continue
+            try:
+                pcd = o3d.io.read_point_cloud(ply_path)
+                pts = np.asarray(pcd.points, dtype=np.float32)
+                if pts.shape[0] == 0:
+                    continue
+                if pts.shape[0] > num_pts:
+                    pts_t = torch.from_numpy(pts).unsqueeze(0)
+                    sampled, _ = sample_farthest_points(pts_t, K=num_pts)
+                    pts = sampled.squeeze(0).numpy().astype(np.float32)
+                self._fps_cache[label_id] = pts
+                loaded += 1
+            except Exception as exc:
+                print(f"[FilterSmallBoxLowVis] failed to load {ply_path}: {exc}")
+
+        if loaded > 0:
+            try:
+                torch.save(self._fps_cache, cache_path)
+                print(
+                    f"[FilterSmallBoxLowVis] dynamic vis enabled: {loaded} models, "
+                    f"{num_pts} FPS pts each (cached → {cache_path})"
+                )
+            except Exception as exc:
+                print(f"[FilterSmallBoxLowVis] cache save failed ({exc}), continuing without cache")
+
+    def _load_diameters(self, coco_path: str, category_file: str) -> None:
+        """Load per-class diameter (mm) from BOP `models_info.json`."""
+        try:
+            import yaml, json
+        except Exception:
+            return
+        coco_path_exp = os.path.expanduser(coco_path)
+        cat_path = os.path.expanduser(category_file)
+        info_path = os.path.join(coco_path_exp, "models", "models_info.json")
+        if not (os.path.isfile(cat_path) and os.path.isfile(info_path)):
+            return
+        with open(cat_path, "r") as f:
+            cat = yaml.safe_load(f).get("category2name", {})
+        with open(info_path, "r") as f:
+            info = json.load(f)
+        for label_id, cat_id in enumerate(cat.keys()):
+            entry = info.get(str(int(cat_id))) or info.get(int(cat_id))
+            if entry and "diameter" in entry:
+                self._diameter_cache[label_id] = float(entry["diameter"])
+
+    def _compute_dynamic_visib(
+        self, target: Dict[str, Any], masks_np: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """PLY 점을 pose+K로 투영해서 visible mask 안에 든 비율을 instance별로 계산.
+
+        반환 [N]: 모델이 로드된 instance는 [0,1] 비율, 안 된 instance는 NaN.
+        """
+        if not self._fps_cache:
+            return None
+
+        poses = target.get("poses")
+        cam_K = target.get("cam_K")
+        labels = target.get("labels")
+        if poses is None or cam_K is None or labels is None:
+            return None
+
+        poses_data = poses.data if hasattr(poses, "data") else poses
+        poses_np = (
+            poses_data.numpy() if torch.is_tensor(poses_data) else np.asarray(poses_data)
+        )
+        cam_K_np = cam_K.numpy() if torch.is_tensor(cam_K) else np.asarray(cam_K)
+        labels_np = labels.numpy() if torch.is_tensor(labels) else np.asarray(labels)
+
+        N = masks_np.shape[0]
+        H, W = masks_np.shape[1], masks_np.shape[2]
+        vis = np.full(N, np.nan, dtype=np.float32)
+
+        for i in range(N):
+            label_id = int(labels_np[i])
+            pts = self._fps_cache.get(label_id)
+            if pts is None:
+                continue  # NaN → fallback path takes over
+
+            pose_i = poses_np[i].reshape(-1)
+            t = pose_i[:3].astype(np.float32)
+
+            # Pre-filter: tz < diameter/2 means object intersects camera near plane.
+            # Some FPS pts will have Z<0 → projection ill-defined. Mark vis=0 (filter).
+            diameter = self._diameter_cache.get(label_id)
+            if diameter is not None and float(t[2]) < 0.5 * diameter:
+                vis[i] = 0.0
+                continue
+
+            R = pose_i[3:12].reshape(3, 3).astype(np.float32)
+            K = (
+                cam_K_np[i].reshape(3, 3) if cam_K_np.ndim > 1 else cam_K_np.reshape(3, 3)
+            ).astype(np.float32)
+
+            X_cam = pts @ R.T + t  # [N_pts, 3] in mm
+            Z = X_cam[:, 2]
+            valid = Z > 1e-3
+            if not valid.any():
+                vis[i] = 0.0
+                continue
+
+            # Z 1mm 하한: tz<d/2 케이스를 위에서 걸렀으므로 Z>0 가 보장되지만
+            # 수치 안전을 위해 1mm 클램프 (int32 cast 안전 범위 보장).
+            Z_safe = np.maximum(Z, 1.0)
+            u = K[0, 0] * X_cam[:, 0] / Z_safe + K[0, 2]
+            v = K[1, 1] * X_cam[:, 1] / Z_safe + K[1, 2]
+            ui = np.floor(u + 0.5).astype(np.int32)
+            vi = np.floor(v + 0.5).astype(np.int32)
+            in_img = valid & (ui >= 0) & (ui < W) & (vi >= 0) & (vi < H)
+            if not in_img.any():
+                vis[i] = 0.0
+                continue
+
+            mask = masks_np[i] > 0
+            n_inside = int(mask[vi[in_img], ui[in_img]].sum())
+            vis[i] = n_inside / max(pts.shape[0], 1)
+
+        return vis
 
     def forward(self, *inputs):
         input_tuple = inputs[0] if len(inputs) == 1 else inputs
@@ -2732,53 +2835,51 @@ class FilterSmallBoxLowVis(nn.Module):
             return (image, target)
 
         masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
+        N = masks_np.shape[0]
+        H, W = masks_np.shape[1], masks_np.shape[2]
 
-        # Visibility source priority (requested order):
-        #   1) target["amodal_masks"] / "full_masks" — mask-area ratio.
-        #      Preferred when the amodal mask is actually present because
-        #      transforms like zoom/render can mutate visibility away from
-        #      the annotation value.
-        #   2) target["visibility"] (from BOP ann `visibility` field) —
-        #      fallback when no amodal mask was generated. Cheap and valid
-        #      for pipelines that don't mutate occlusion (Resize, etc.).
-        amodal_np = None
-        if self.min_visib > 0:
-            amodal_masks = target.get("amodal_masks")
-            if amodal_masks is None:
-                amodal_masks = target.get("full_masks")
-            if amodal_masks is not None:
-                amodal_np = amodal_masks.numpy() if torch.is_tensor(amodal_masks) else np.array(amodal_masks)
+        # Vectorized bbox-size check.
+        # `np.any` works directly on integer masks (0 → False, nonzero → True),
+        # so we avoid the [N,H,W] boolean materialization that `masks_np > 0` does.
+        y_any = masks_np.any(axis=2)                  # [N, H]
+        x_any = masks_np.any(axis=1)                  # [N, W]
+        has_any = y_any.any(axis=1)                   # [N]
+
+        # First / last True column via argmax. argmax on all-False rows returns 0,
+        # which is harmless because `has_any` masks those instances to width=height=0.
+        x_min = x_any.argmax(axis=1)
+        x_max = (W - 1) - x_any[:, ::-1].argmax(axis=1)
+        y_min = y_any.argmax(axis=1)
+        y_max = (H - 1) - y_any[:, ::-1].argmax(axis=1)
+        widths = np.where(has_any, x_max - x_min, 0)
+        heights = np.where(has_any, y_max - y_min, 0)
+
+        size_ok = (widths >= self.min_size) & (heights >= self.min_size) & has_any
+
+        # Visibility: dynamic (PLY 투영) 1순위, 실패한 instance는 ann visibility로 fallback.
+        dyn_vis = self._compute_dynamic_visib(target, masks_np) if self.min_visib > 0 else None
 
         ann_visib = None
-        if amodal_np is None and self.min_visib > 0:
+        if self.min_visib > 0:
             v = target.get("visibility")
             if v is not None:
                 ann_visib = v.numpy() if torch.is_tensor(v) else np.asarray(v)
 
-        keep = []
-        for i in range(len(masks_np)):
-            vys, vxs = np.where(masks_np[i] > 0)
-            if len(vys) == 0:
-                keep.append(False)
-                continue
-            w = int(vxs.max()) - int(vxs.min())
-            h = int(vys.max()) - int(vys.min())
-            size_ok = w >= self.min_size and h >= self.min_size
+        if self.min_visib > 0:
+            visib_fract = np.full(N, np.nan, dtype=np.float32)
+            if dyn_vis is not None:
+                visib_fract = np.where(np.isnan(dyn_vis), visib_fract, dyn_vis)
+            if ann_visib is not None:
+                use_ann = np.isnan(visib_fract) & (np.arange(N) < len(ann_visib))
+                if use_ann.any():
+                    visib_fract = np.where(use_ann, ann_visib[:N], visib_fract)
+            # NaN remaining → no source available, treat as visible (no filter)
+            visib_fract = np.where(np.isnan(visib_fract), 1.0, visib_fract)
+            visib_ok = visib_fract >= self.min_visib
+        else:
+            visib_ok = np.ones(N, dtype=bool)
 
-            # Visibility 필터: amodal mask ratio 우선, 없으면 ann visibility.
-            visib_ok = True
-            if self.min_visib > 0:
-                if amodal_np is not None:
-                    vis_area = float(masks_np[i].sum())
-                    amodal_area = float(amodal_np[i].sum())
-                    visib_fract = vis_area / max(amodal_area, 1.0)
-                    visib_ok = visib_fract >= self.min_visib
-                elif ann_visib is not None and i < len(ann_visib):
-                    visib_ok = float(ann_visib[i]) >= self.min_visib
-
-            keep.append(size_ok and visib_ok)
-
-        keep = torch.tensor(keep, dtype=torch.bool)
+        keep = torch.tensor(size_ok & visib_ok, dtype=torch.bool)
 
         if keep.all():
             if dataset_info is not None:
@@ -2819,7 +2920,6 @@ class FilterSmallBoxLowVis(nn.Module):
         if dataset_info is not None:
             return (image, filtered, dataset_info)
         return (image, filtered)
-
 
 @register()
 class BackgroundReplacement:

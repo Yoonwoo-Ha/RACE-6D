@@ -6,7 +6,6 @@ ema:
   decay: 0.9999
   warmups: 2000
 
-
 epoches: 50
 clip_max_norm: 0.1
 

@@ -211,10 +211,8 @@ class TransformerDecoderLayer(nn.Module):
                  activation='relu',
                  n_levels=4,
                  n_points=4,
-                 cross_attn_method='default',
-                 group_detr=1):
+                 cross_attn_method='default'):
         super(TransformerDecoderLayer, self).__init__()
-        self.group_detr = group_detr
 
         # self attention
         self.self_attn = nn.MultiheadAttention(d_model, n_head, dropout=dropout, batch_first=True)
@@ -261,17 +259,8 @@ class TransformerDecoderLayer(nn.Module):
         bs = target.shape[0]
 
         if attn_mask is not None:
-            # DN active: combined attn_mask handles both DN isolation and group isolation
+            # DN active: attn_mask isolates DN queries from normal queries
             target2, _ = self.self_attn(q, k, value=target, attn_mask=attn_mask)
-        elif self.training and self.group_detr > 1:
-            # No DN, group_detr only: split-merge for group isolation
-            num_queries = target.shape[1]
-            g_size = num_queries // self.group_detr
-            q = torch.cat(q.split(g_size, dim=1), dim=0)      # [B, G*N, C] → [B*G, N, C]
-            k = torch.cat(k.split(g_size, dim=1), dim=0)
-            v = torch.cat(target.split(g_size, dim=1), dim=0)
-            target2, _ = self.self_attn(q, k, value=v)
-            target2 = torch.cat(target2.split(bs, dim=0), dim=1)  # [B*G, N, C] → [B, G*N, C]
         else:
             target2, _ = self.self_attn(q, k, value=target)
 
@@ -372,7 +361,7 @@ class TransformerDecoder(nn.Module):
         
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2) # [B,N,1,4]
-            query_pos_embed = query_pos_head(torch.concat([ref_points_detach, pred_depth_detach], dim=-1)) # [B,N,H]
+            query_pos_embed = query_pos_head(torch.concat([ref_points_detach, pred_depth_detach], dim=-1))  # [B,N,H]
 
             output = layer(output, ref_points_input, memory, memory_spatial_shapes, attn_mask, memory_mask, query_pos_embed)
 
@@ -431,7 +420,7 @@ class TransformerDecoder(nn.Module):
 
 @register()
 class RACE6DTransformer_DQE(nn.Module):
-    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file', 'group_detr']
+    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file']
 
     def __init__(self,
                  num_classes=80,
@@ -461,10 +450,11 @@ class RACE6DTransformer_DQE(nn.Module):
                  coco_path=None,
                  category_file=None,
                  max_sym_disc_step=0.01,
-                 group_detr=1,
                  num_denoising=100,
                  label_noise_ratio=0.5,
                  box_noise_scale=1.0,
+                 r_min=0.5,
+                 r_max=2.0,
                  ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -479,7 +469,6 @@ class RACE6DTransformer_DQE(nn.Module):
         self.num_levels = num_levels
         self.num_classes = num_classes
         self.num_queries = num_queries
-        self.group_detr = group_detr
         self.eps = eps
         self.num_layers = num_layers
         # eval_spatial_size: 실제 모델 입력 크기 (anchors/pos embed 용)
@@ -509,10 +498,10 @@ class RACE6DTransformer_DQE(nn.Module):
         self._build_input_proj_layer(feat_channels)
 
         # Transformer module
-        self.r_min = nn.Parameter(torch.tensor(0.5), requires_grad=False)
-        self.r_max = nn.Parameter(torch.tensor(2.0), requires_grad=False)
+        self.r_min = nn.Parameter(torch.tensor(r_min), requires_grad=False)
+        self.r_max = nn.Parameter(torch.tensor(r_max), requires_grad=False)
         self.sharp = nn.Parameter(torch.tensor(2.0), requires_grad=False)
-        decoder_layer = TransformerDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout, activation, num_levels, num_points, cross_attn_method=cross_attn_method, group_detr=group_detr)
+        decoder_layer = TransformerDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout, activation, num_levels, num_points, cross_attn_method=cross_attn_method)
         self.decoder = TransformerDecoder(hidden_dim, decoder_layer, num_layers, eval_idx, reg_max, self.r_min, self.r_max, self.sharp, reg_scale)
 
         # decoder embedding
@@ -521,29 +510,17 @@ class RACE6DTransformer_DQE(nn.Module):
             self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
         self.query_pos_head = MLP(4 + 1, 2 * hidden_dim, hidden_dim, 2) # (xywh + tz_m)
 
-        # Encoder heads: group_detr개 독립 copies (rf-detr style)
+        # Encoder heads (single shared branch)
         enc_score_cls = 1 if query_select_method == 'agnostic' else num_classes
-        self.enc_output = nn.ModuleList([
-            nn.Sequential(OrderedDict([
-                ('proj', nn.Linear(hidden_dim, hidden_dim)),
-                ('norm', nn.LayerNorm(hidden_dim)),
-            ])) for _ in range(group_detr)
-        ])
-        self.enc_score_head = nn.ModuleList([
-            nn.Linear(hidden_dim, enc_score_cls) for _ in range(group_detr)
-        ])
-        self.enc_bbox_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, 4, 3, mlp_act) for _ in range(group_detr)
-        ])
-        self.enc_kpt_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, 2 * num_keypoints, 3, mlp_act) for _ in range(group_detr)
-        ])
-        self.enc_trans_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, 3, 3, mlp_act) for _ in range(group_detr)
-        ])
-        self.enc_rot_head = nn.ModuleList([
-            MLP(hidden_dim + 2 * num_keypoints, hidden_dim, 6, 3, mlp_act) for _ in range(group_detr)
-        ])
+        self.enc_output = nn.Sequential(OrderedDict([
+            ('proj', nn.Linear(hidden_dim, hidden_dim)),
+            ('norm', nn.LayerNorm(hidden_dim)),
+        ]))
+        self.enc_score_head = nn.Linear(hidden_dim, enc_score_cls)
+        self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3, mlp_act)
+        self.enc_kpt_head = MLP(hidden_dim, hidden_dim, 2 * num_keypoints, 3, mlp_act)
+        self.enc_trans_head = MLP(hidden_dim, hidden_dim, 3, 3, mlp_act)
+        self.enc_rot_head = MLP(hidden_dim + 2 * num_keypoints, hidden_dim, 6, 3, mlp_act)
 
         # decoder head
         self.dec_score_head = nn.ModuleList([
@@ -582,17 +559,17 @@ class RACE6DTransformer_DQE(nn.Module):
     def _reset_parameters(self):
         bias = bias_init_with_prob(0.01)
         identity_r6d = torch.tensor([1., 0., 0., 0., 1., 0.])
-        # Encoder heads 초기화 (group_detr개 각각)
-        for g_i in range(self.group_detr):
-            init.constant_(self.enc_score_head[g_i].bias, bias)
-            init.constant_(self.enc_bbox_head[g_i].layers[-1].weight, 0)
-            init.constant_(self.enc_bbox_head[g_i].layers[-1].bias, 0)
-            init.constant_(self.enc_kpt_head[g_i].layers[-1].weight, 0)
-            init.constant_(self.enc_kpt_head[g_i].layers[-1].bias, 0)
-            init.constant_(self.enc_trans_head[g_i].layers[-1].weight, 0)
-            init.constant_(self.enc_trans_head[g_i].layers[-1].bias, 0)
-            init.constant_(self.enc_rot_head[g_i].layers[-1].weight, 0)
-            self.enc_rot_head[g_i].layers[-1].bias.data.copy_(identity_r6d + torch.randn(6) * 0.01)
+
+        # Encoder heads 초기화
+        init.constant_(self.enc_score_head.bias, bias)
+        init.constant_(self.enc_bbox_head.layers[-1].weight, 0)
+        init.constant_(self.enc_bbox_head.layers[-1].bias, 0)
+        init.constant_(self.enc_kpt_head.layers[-1].weight, 0)
+        init.constant_(self.enc_kpt_head.layers[-1].bias, 0)
+        init.constant_(self.enc_trans_head.layers[-1].weight, 0)
+        init.constant_(self.enc_trans_head.layers[-1].bias, 0)
+        init.constant_(self.enc_rot_head.layers[-1].weight, 0)
+        self.enc_rot_head.layers[-1].bias.data.copy_(identity_r6d + torch.randn(6) * 0.01)
 
         # Decoder heads 초기화 (헤드별 특성에 맞게 설정)
         for _cls, _box, _kpt, _trans, _reg, _rot in zip(self.dec_score_head, self.dec_bbox_head, self.dec_kpt_head, self.dec_trans_xy_head, self.dec_reg_head, self.dec_rot_head):
@@ -605,12 +582,10 @@ class RACE6DTransformer_DQE(nn.Module):
             init.constant_(_trans.layers[-1].bias, 0)
             init.constant_(_reg.layers[-1].weight, 0)
             init.constant_(_reg.layers[-1].bias, 0)
-            # Rotation: identity로 초기화
             init.constant_(_rot.layers[-1].weight, 0)
             _rot.layers[-1].bias.data.copy_(identity_r6d + torch.randn(6) * 0.01)
 
-        for enc_out in self.enc_output:
-            init.xavier_uniform_(enc_out[0].weight)
+        init.xavier_uniform_(self.enc_output[0].weight)
         if self.learn_query_content:
             init.xavier_uniform_(self.tgt_embed.weight)
         init.xavier_uniform_(self.query_pos_head.layers[0].weight)
@@ -917,62 +892,38 @@ class RACE6DTransformer_DQE(nn.Module):
 
         memory = valid_mask.to(memory.dtype) * memory
 
-        # Group DETR: 각 그룹이 독립 projection + top-K (rf-detr style)
-        group_detr = self.group_detr if self.training else 1
+        # Encoder projection + top-K query selection
+        output_memory = self.enc_output(memory)
+        enc_outputs_logits = self.enc_score_head(output_memory)
+
+        enc_topk_memory, enc_topk_logits, enc_topk_anchors = self._select_topk(
+            output_memory, enc_outputs_logits, self.num_queries, anchors=anchors_bbox)
+
+        enc_topk_bbox_unact = self.enc_bbox_head(enc_topk_memory) + enc_topk_anchors
+        enc_topk_bboxes = torch.sigmoid(enc_topk_bbox_unact)
+        enc_topk_trans = self.enc_trans_head(enc_topk_memory)
+        enc_topk_keypoints = self.enc_kpt_head(enc_topk_memory)
+        with torch.amp.autocast('cuda', enabled=False):
+            enc_rot_input = torch.cat([enc_topk_memory.float(), enc_topk_keypoints.detach().float()], dim=-1)
+            enc_topk_rots = rotation_6d_to_matrix(self.enc_rot_head(enc_rot_input))
+
         enc_topk_bboxes_list, enc_topk_kpts_list, enc_topk_trans_list, enc_topk_rots_list, enc_topk_logits_list = [], [], [], [], []
+        if self.vis_enc:
+            enc_topk_bboxes_list.append(enc_topk_bboxes)
+            enc_topk_kpts_list.append(enc_topk_keypoints)
+            enc_topk_logits_list.append(enc_topk_logits)
+            enc_topk_trans_list.append(enc_topk_trans.float())
+            enc_topk_rots_list.append(enc_topk_rots.float().flatten(-2))
 
-        content_groups = []
-        bbox_unact_groups = []
-        kpt_groups = []
-        trans_groups = []
-        rot_groups = []
-
-        for g_i in range(group_detr):
-            output_memory_g = self.enc_output[g_i](memory)
-            enc_outputs_logits_g = self.enc_score_head[g_i](output_memory_g)
-
-            enc_topk_memory_g, enc_topk_logits_g, enc_topk_anchors_g = self._select_topk(
-                output_memory_g, enc_outputs_logits_g, self.num_queries, anchors=anchors_bbox)
-
-            enc_topk_bbox_unact_g = self.enc_bbox_head[g_i](enc_topk_memory_g) + enc_topk_anchors_g
-            enc_topk_bboxes_g = torch.sigmoid(enc_topk_bbox_unact_g)
-            enc_topk_trans_g = self.enc_trans_head[g_i](enc_topk_memory_g)
-            enc_topk_keypoints_g = self.enc_kpt_head[g_i](enc_topk_memory_g)
-            with torch.amp.autocast('cuda', enabled=False):
-                enc_rot_input_g = torch.cat([enc_topk_memory_g.float(), enc_topk_keypoints_g.detach().float()], dim=-1)
-                enc_topk_rots_g = rotation_6d_to_matrix(self.enc_rot_head[g_i](enc_rot_input_g))
-
-            if self.vis_enc:
-                enc_topk_bboxes_list.append(enc_topk_bboxes_g)
-                enc_topk_kpts_list.append(enc_topk_keypoints_g)
-                enc_topk_logits_list.append(enc_topk_logits_g)
-                enc_topk_trans_list.append(enc_topk_trans_g.float())
-                enc_topk_rots_list.append(enc_topk_rots_g.float().flatten(-2))
-
-            content_groups.append(enc_topk_memory_g.detach())
-            bbox_unact_groups.append(enc_topk_bbox_unact_g.detach())
-            kpt_groups.append(enc_topk_keypoints_g.detach())
-            trans_groups.append(enc_topk_trans_g.detach())
-            rot_groups.append(enc_topk_rots_g.detach())
-
-        # Concat groups on query dim: [B, N, ...] * G → [B, G*N, ...]
         if self.learn_query_content:
             content = self.tgt_embed.weight.unsqueeze(0).tile([memory.shape[0], 1, 1])
         else:
-            content = torch.cat(content_groups, dim=1)
+            content = enc_topk_memory.detach()
 
-        enc_topk_bbox_unact = torch.cat(bbox_unact_groups, dim=1)
-        enc_topk_keypoints = torch.cat(kpt_groups, dim=1)
-        enc_topk_trans = torch.cat(trans_groups, dim=1)
-        enc_topk_rots = torch.cat(rot_groups, dim=1)  # [B, G*N, 3, 3]
-
-        # vis_enc: concat group outputs for enc_aux_outputs
-        if self.vis_enc and group_detr > 1:
-            enc_topk_bboxes_list = [torch.cat(enc_topk_bboxes_list, dim=1)]
-            enc_topk_kpts_list = [torch.cat(enc_topk_kpts_list, dim=1)]
-            enc_topk_logits_list = [torch.cat(enc_topk_logits_list, dim=1)]
-            enc_topk_trans_list = [torch.cat(enc_topk_trans_list, dim=1)]
-            enc_topk_rots_list = [torch.cat(enc_topk_rots_list, dim=1)]
+        enc_topk_bbox_unact = enc_topk_bbox_unact.detach()
+        enc_topk_keypoints = enc_topk_keypoints.detach()
+        enc_topk_trans = enc_topk_trans.detach()
+        enc_topk_rots = enc_topk_rots.detach()
 
         return (content, enc_topk_bbox_unact, enc_topk_keypoints, enc_topk_trans, enc_topk_rots,
                 enc_topk_bboxes_list, enc_topk_kpts_list, enc_topk_trans_list, enc_topk_rots_list, enc_topk_logits_list)
@@ -1021,15 +972,12 @@ class RACE6DTransformer_DQE(nn.Module):
         attn_mask = None
         dn_meta = None
         if self.training and self.num_denoising > 0 and targets is not None and self._has_pose_info:
-            group_detr = self.group_detr if self.training else 1
-            num_queries_total = init_ref_contents.shape[1]  # G*N
+            num_queries_total = init_ref_contents.shape[1]
 
-            # DN 매칭에는 첫 번째 그룹의 encoder 출력 사용
-            N = self.num_queries
-            enc_bbox_g0 = torch.sigmoid(init_ref_points_unact[:, :N]).detach()
-            enc_kpt_g0 = init_ref_keypoints[:, :N].detach()
-            enc_trans_g0 = init_ref_trans[:, :N].detach()
-            enc_rot_g0 = init_ref_rots[:, :N].detach()
+            enc_bbox = torch.sigmoid(init_ref_points_unact).detach()
+            enc_kpt = init_ref_keypoints.detach()
+            enc_trans = init_ref_trans.detach()
+            enc_rot = init_ref_rots.detach()
 
             # cam_K is calibrated in original image coordinates, so pixel-level
             # conversions inside DN training (_enc_trans_to_3d) must use each
@@ -1040,11 +988,10 @@ class RACE6DTransformer_DQE(nn.Module):
 
             dn_result = get_pose_denoising_training_group(
                 targets,
-                enc_bbox_g0, enc_kpt_g0, enc_trans_g0, enc_rot_g0,
+                enc_bbox, enc_kpt, enc_trans, enc_rot,
                 self.get_points_3d_cache(), self.models_info, self.mscoco_label2category,
                 self.num_classes, num_queries_total,
                 self.denoising_class_embed,
-                group_detr=group_detr,
                 img_w=img_w, img_h=img_h,
                 num_denoising=self.num_denoising,
                 label_noise_ratio=self.label_noise_ratio,

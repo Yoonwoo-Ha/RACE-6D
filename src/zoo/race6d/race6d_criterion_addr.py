@@ -21,7 +21,7 @@ class RACE6DCriterion_addr(nn.Module):
         1) 모델의 출력과 정답 박스 간 헝가리안 매칭을 계산
         2) 매칭된 각 쌍에 대해 감독 학습(클래스와 박스 모두)
     """
-    __share__ = ['num_classes', 'group_detr']
+    __share__ = ['num_classes']
     __inject__ = ['matcher']
 
     def __init__(self, \
@@ -36,7 +36,7 @@ class RACE6DCriterion_addr(nn.Module):
         boxes_weight_format=None,
         share_matched_indices=False,
         enc_weight_dict=None,
-        group_detr=1,
+        pose_quality_scale=0.2,
         **kwargs):
         """
         Parameters:
@@ -53,6 +53,9 @@ class RACE6DCriterion_addr(nn.Module):
         self.enc_weight_dict = enc_weight_dict or weight_dict
         self.losses = losses
         self.boxes_weight_format = boxes_weight_format
+        # Pose-aware score target (boxes_weight_format='iou_pose')
+        #   values = ADD-R/diameter based pose_quality in [0, 1] (bbox IoU 미반영)
+        self.pose_quality_scale = float(pose_quality_scale)
         self.share_matched_indices = share_matched_indices
         self.alpha = alpha
         self.gamma = gamma
@@ -60,7 +63,6 @@ class RACE6DCriterion_addr(nn.Module):
         # 미지정 시 기존 gamma로 fallback (backward compat)
         self.gamma_pos = gamma_pos if gamma_pos is not None else gamma
         self.gamma_neg = gamma_neg if gamma_neg is not None else gamma
-        self.group_detr = group_detr
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.current_epoch = 0
 
@@ -89,6 +91,15 @@ class RACE6DCriterion_addr(nn.Module):
         self.models_info = decoder.models_info
         self.num_classes = len(self.mscoco_label2category)
 
+        # Propagate pose data to matcher so cost_keypoint (sym-aware kpt L1) can be computed.
+        # If matcher doesn't support it, this is a no-op.
+        if hasattr(self.matcher, 'set_pose_source') and callable(self.matcher.set_pose_source):
+            self.matcher.set_pose_source(
+                keypoints_3d=self.keypoints_3d,
+                sym_cache=self.sym_cache,
+                mscoco_label2category=self.mscoco_label2category,
+            )
+
     def _get_orig_size(self, targets):
         """targets에서 원본 이미지 크기 (w, h) 반환.
 
@@ -100,46 +111,29 @@ class RACE6DCriterion_addr(nn.Module):
     def get_symmetry_type(self, label_id: int) -> str:
         """
         객체의 대칭성 타입을 판별
-        
+
+        반환 string은 내부에서 오직 `== 'asymmetric'` 이진 분기에만 사용됨.
+        실제 대칭 회전 행렬은 decoder가 만든 `sym_cache[label_id]`에 임의 축 포함
+        Rodrigues로 정확히 계산돼 있으므로, 여기선 "대칭 여부"만 판단하면 됨.
+
         Args:
             label_id: 리맵된 레이블 ID (0-index)
-            
+
         Returns:
-            str: 'asymmetric', 'z_symmetric', 'discrete_symmetric'
+            str: 'asymmetric', 'continuous_symmetric', 'discrete_symmetric'
         """
         obj_info = self.models_info.get(label_id)
         if obj_info is None:
             return 'asymmetric'
-        
-        # 연속 대칭이 있는지 확인 (z축 회전)
-        if 'symmetries_continuous' in obj_info:
-            for sym in obj_info['symmetries_continuous']:
-                if sym['axis'] == [0, 0, 1]:  # z축 연속 대칭
-                    return 'z_symmetric'
-                if sym['axis'] == [0, 1, 0]:  # y축 연속 대칭
-                    return 'y_symmetric'
-        
-        # 이산 대칭이 있는지 확인
+
+        if 'symmetries_continuous' in obj_info and len(obj_info['symmetries_continuous']) > 0:
+            return 'continuous_symmetric'
+
         if 'symmetries_discrete' in obj_info and len(obj_info['symmetries_discrete']) > 0:
             return 'discrete_symmetric'
-        
-        # 대칭성이 없으면 비대칭
+
         return 'asymmetric'
     
-    def loss_labels_focal(self, outputs, targets, indices, num_boxes):
-        assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
-        idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
-                                    dtype=torch.int64, device=self.device)
-        target_classes[idx] = target_classes_o
-        target = F.one_hot(target_classes, num_classes=self.num_classes+1)[..., :-1]
-        loss = torchvision.ops.sigmoid_focal_loss(src_logits, target, self.alpha, self.gamma, reduction='none')
-        loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
-
-        return {'loss_focal': loss}
-
     def loss_labels_vfl(self, outputs, targets, indices, num_boxes, values=None):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
@@ -276,12 +270,9 @@ class RACE6DCriterion_addr(nn.Module):
 
         # cam_K from targets (per-instance)
         cam_K = torch.cat([t['cam_K'][j] for t, (_, j) in zip(targets, indices)], dim=0)
-        cam_K = cam_K[0].reshape(3, 3)
+        cam_K = cam_K.reshape(-1, 3, 3)  # [N,3,3] per-instance
 
         t_gt = self._c2t_gt(target_poses[:, :3], cam_K)  # [N,3] - (tx, ty, tz) in mm
-
-        fx, fy = cam_K[0, 0], cam_K[1, 1]
-        px, py = cam_K[0, 2], cam_K[1, 2]
 
         # pred bbox-relative → pixel (GT boxes 사용)
         target_boxes = torch.cat([t['boxes'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N,4]
@@ -314,6 +305,11 @@ class RACE6DCriterion_addr(nn.Module):
             tg = t_gt[mask]                     # [M,3]
             bbox_area = bbox_area_pix[mask]     # [M] - 픽셀 area
             pred = pred_pix[mask]               # [M,32,2] - 픽셀 좌표
+            Kg = cam_K[mask]                    # [M,3,3] - per-instance intrinsics
+            fx = Kg[:, 0, 0][:, None, None]     # [M,1,1]
+            fy = Kg[:, 1, 1][:, None, None]
+            px = Kg[:, 0, 2][:, None, None]
+            py = Kg[:, 1, 2][:, None, None]
 
             # 3D 키포인트 32개 로드
             kp3d_cls = self.keypoints_3d[category_id - 1].to(device)  # [32,3]
@@ -332,7 +328,9 @@ class RACE6DCriterion_addr(nn.Module):
 
             # 2. 32개 키포인트를 3D → 2D 투영 (픽셀)
             X_cam = torch.einsum('msij, mkj -> mski', R_prime, kp3d) + t_prime.unsqueeze(2)  # [M,S,32,3]
-            Z = X_cam[..., 2].clamp_min(1e-6)  # [M,S,32]
+            # NOTE: clamp는 mm 단위. 1mm 이하로 내려가는 물리적 상황은 없음.
+            # 1e-6은 fp16 subnormal 영역이라 AMP 하에서 underflow 위험.
+            Z = X_cam[..., 2].clamp_min(1.0)  # [M,S,32]
             u_pix = fx * (X_cam[..., 0] / Z) + px  # [M,S,32]
             v_pix = fy * (X_cam[..., 1] / Z) + py  # [M,S,32]
 
@@ -341,12 +339,12 @@ class RACE6DCriterion_addr(nn.Module):
             # === 예측 키포인트 확장 ===
             pred_exp = pred.unsqueeze(1).expand(-1, S, -1, -1)  # [M,S,32,2] 픽셀
 
-            # === 1. L1 Loss (픽셀 diff → 이미지 크기로 정규화) ===
+            # === 1. L1 Loss (image-normalized space) ===
             diff = pred_exp - tgt_pix  # [M,S,32,2] 픽셀 단위
-            diff_norm = diff.clone()
-            diff_norm[..., 0] = diff[..., 0] / img_w
-            diff_norm[..., 1] = diff[..., 1] / img_h
-            l1_per_point = torch.abs(diff_norm).sum(dim=-1)  # [M,S,32]
+            diff_img = diff.clone()
+            diff_img[..., 0] = diff[..., 0] / img_w
+            diff_img[..., 1] = diff[..., 1] / img_h
+            l1_per_point = torch.abs(diff_img).sum(dim=-1)  # [M,S,32]
             l1_per_symmetry = l1_per_point.sum(dim=-1)  # [M,S]
 
             # === 2. OKS Loss (픽셀 공간에서) ===
@@ -424,49 +422,6 @@ class RACE6DCriterion_addr(nn.Module):
             'loss_cr': loss_cr,
             'metric_kpt_error': kpt_error.detach(),
         }
-    
-    def _bbox_relative_to_pixel(self, keypoints_relative, bbox_info, img_w=640, img_h=480):
-        """
-        Bbox 중심 상대 좌표를 픽셀 절대 좌표로 변환
-        
-        Args:
-            keypoints_relative: [N, K, 2] bbox 중심 기준 정규화 좌표 (w, h로 나눈 값)
-            bbox_info: [N, 4] normalized [cx, cy, w, h]
-            img_w, img_h: 이미지 크기 (픽셀)
-        
-        Returns:
-            keypoints_pixel: [N, K, 2] 픽셀 절대 좌표
-        """
-        # 입력이 1D인 경우 2D로 확장
-        if keypoints_relative.dim() == 2:
-            keypoints_relative = keypoints_relative.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        if bbox_info.dim() == 1:
-            bbox_info = bbox_info.unsqueeze(0)
-        
-        # Bbox를 픽셀 단위로 변환
-        cx_pix = bbox_info[:, 0] * img_w  # [N]
-        cy_pix = bbox_info[:, 1] * img_h  # [N]
-        w_pix = bbox_info[:, 2] * img_w   # [N]
-        h_pix = bbox_info[:, 3] * img_h   # [N]
-        
-        # Bbox 중심 상대 → 픽셀 절대
-        kpts_x_pix = keypoints_relative[..., 0] * w_pix.unsqueeze(-1) + cx_pix.unsqueeze(-1)  # [N, K]
-        kpts_y_pix = keypoints_relative[..., 1] * h_pix.unsqueeze(-1) + cy_pix.unsqueeze(-1)  # [N, K]
-        
-        # [선택사항] 극단값 제한 (이미지 크기의 2배 범위)
-        kpts_x_pix = kpts_x_pix.clamp(-img_w, 2 * img_w)
-        kpts_y_pix = kpts_y_pix.clamp(-img_h, 2 * img_h)
-        
-        keypoints_pixel = torch.stack([kpts_x_pix, kpts_y_pix], dim=-1)  # [N, K, 2]
-        
-        if squeeze_output:
-            keypoints_pixel = keypoints_pixel.squeeze(0)
-        
-        return keypoints_pixel
 
     def compute_cross_ratio_loss(self, pred_keypoints, target_keypoints, label_id):
         """
@@ -543,7 +498,7 @@ class RACE6DCriterion_addr(nn.Module):
     def _c2t_pred(self, translation, cam_K, bbox_info, img_w, img_h):
         """Convert bbox-relative (rx, ry, log_tz) to 3D translation (mm).
         translation: [N, 3] or [3]  — (rx, ry, log_tz)  bbox-relative offset
-        cam_K: [3, 3] camera intrinsics
+        cam_K: [3, 3] or [N, 3, 3] camera intrinsics (per-instance 지원)
         bbox_info: [N, 4] normalized [cx, cy, w, h]
         img_w, img_h: 원본 이미지 크기 (caller가 반드시 전달, cam_K 기준과 일치해야 함)
         """
@@ -556,10 +511,18 @@ class RACE6DCriterion_addr(nn.Module):
 
         rx, ry, log_tz = translation[:, 0], translation[:, 1], translation[:, 2]
 
-        fx = cam_K[0, 0]
-        fy = cam_K[1, 1]
-        px = cam_K[0, 2]
-        py = cam_K[1, 2]
+        if cam_K.dim() == 3:
+            # Per-instance [N, 3, 3]
+            fx = cam_K[:, 0, 0]
+            fy = cam_K[:, 1, 1]
+            px = cam_K[:, 0, 2]
+            py = cam_K[:, 1, 2]
+        else:
+            # Shared [3, 3]
+            fx = cam_K[0, 0]
+            fy = cam_K[1, 1]
+            px = cam_K[0, 2]
+            py = cam_K[1, 2]
 
         if bbox_info.dim() == 1:
             bbox_info = bbox_info.unsqueeze(0)
@@ -664,7 +627,7 @@ class RACE6DCriterion_addr(nn.Module):
 
         # cam_K from targets (per-instance)
         cam_K = torch.cat([t['cam_K'][j] for t, (_, j) in zip(targets, indices)], dim=0)
-        cam_K = cam_K[0].reshape(3, 3)
+        cam_K = cam_K.reshape(-1, 3, 3)  # [N,3,3] per-instance
 
         target_translations = self._c2t_gt(target_poses[:, :3], cam_K) / 1000.0  # mm → m
 
@@ -719,8 +682,9 @@ class RACE6DCriterion_addr(nn.Module):
                     cls_R_gt, cls_t_gt,
                     sym_Rs, model_points_m,
                 )
+            loss = loss / diameter_m
 
-            all_losses.append(loss / diameter_m)  # diameter 정규화
+            all_losses.append(loss)
             all_sym_indices[cls_mask] = best_sym_idx
 
             if symmetry_type == 'asymmetric':
@@ -863,7 +827,6 @@ class RACE6DCriterion_addr(nn.Module):
             'boxes': self.loss_boxes,
             'vfl': self.loss_labels_vfl,
             'mal': self.loss_labels_mal,
-            'focal': self.loss_labels_focal,
             'pose': self.loss_addr,
             'keypoint': self.loss_keypoints,
         }
@@ -880,26 +843,24 @@ class RACE6DCriterion_addr(nn.Module):
         # sym index 캐시 초기화 (pose → keypoint 순서로 호출 시 공유)
         self._cached_sym_indices = None
 
-        group_detr = self.group_detr if self.training else 1
         outputs_without_aux = {k: v for k, v in outputs.items() if 'aux' not in k}
 
-        # Compute the average number of target boxes across all nodes, for normalization purposes
+        # Retrieve the matching between the outputs of the last layer and the targets
+        matched = self.matcher(outputs_without_aux, targets)
+        indices = matched['indices']
+
         num_boxes = sum(len(t["labels"]) for t in targets)
-        num_boxes = num_boxes * group_detr  # Group DETR: 그룹 수만큼 스케일링하여 loss 평균화
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=self.device)
         if is_dist_available_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
-        # Retrieve the matching between the outputs of the last layer and the targets
-        matched = self.matcher(outputs_without_aux, targets, group_detr=group_detr)
-        indices = matched['indices']
-
         # Main losses
         losses = {}
         for loss in self.losses:
-            meta = self.get_loss_meta_info(loss, outputs, targets, indices)
-            l_dict = self.get_loss(loss, outputs, targets, indices, num_boxes, **meta)
+            idx_use, nb_use = indices, num_boxes
+            meta = self.get_loss_meta_info(loss, outputs, targets, idx_use)
+            l_dict = self.get_loss(loss, outputs, targets, idx_use, nb_use, **meta)
             l_dict_weighted = {}
             for k in l_dict:
                 if k.startswith('metric_'):
@@ -909,19 +870,32 @@ class RACE6DCriterion_addr(nn.Module):
             losses.update(l_dict_weighted)
 
         # Auxiliary losses
+        # - share_matched_indices=True  : main indices 재사용
+        # - share_matched_indices=False : layer 마다 새 매칭
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                if not self.share_matched_indices:
-                    matched = self.matcher(aux_outputs, targets, group_detr=group_detr)
-                    indices = matched['indices']
+                if self.share_matched_indices:
+                    indices_aux = indices
+                    num_boxes_aux = num_boxes
+                else:
+                    matched = self.matcher(aux_outputs, targets)
+                    indices_aux = matched['indices']
+                    num_boxes_aux = num_boxes
                 for loss in self.losses:
-                    meta = self.get_loss_meta_info(loss, aux_outputs, targets, indices)
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **meta)
-                    l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
-                    l_dict = {k + f'_aux_{i}': v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+                    idx_use, nb_use = indices_aux, num_boxes_aux
+                    meta = self.get_loss_meta_info(loss, aux_outputs, targets, idx_use)
+                    l_dict = self.get_loss(loss, aux_outputs, targets, idx_use, nb_use, **meta)
+                    l_dict_kept = {}
+                    for k in l_dict:
+                        if k.startswith('metric_'):
+                            l_dict_kept[k] = l_dict[k].detach()
+                        elif k in self.weight_dict:
+                            l_dict_kept[k] = l_dict[k] * self.weight_dict[k]
+                    l_dict_kept = {k + f'_aux_{i}': v for k, v in l_dict_kept.items()}
+                    losses.update(l_dict_kept)
 
-        # Encoder auxiliary losses (rf-detr style: enc outputs도 group_detr 적용)
+        # Encoder auxiliary losses
+        # enc 는 항상 자체 매칭 필요 (main decoder 와 다른 branch)
         if 'enc_aux_outputs' in outputs:
             assert 'enc_meta' in outputs, ''
             class_agnostic = outputs['enc_meta']['class_agnostic']
@@ -935,14 +909,21 @@ class RACE6DCriterion_addr(nn.Module):
                 enc_targets = targets
 
             for i, aux_outputs in enumerate(outputs['enc_aux_outputs']):
-                matched = self.matcher(aux_outputs, targets, group_detr=group_detr)
-                indices = matched['indices']
+                matched = self.matcher(aux_outputs, targets)
+                indices_enc = matched['indices']
+                num_boxes_enc = num_boxes
                 for loss in self.losses:
-                    meta = self.get_loss_meta_info(loss, aux_outputs, enc_targets, indices)
-                    l_dict = self.get_loss(loss, aux_outputs, enc_targets, indices, num_boxes, **meta)
-                    l_dict = {k: l_dict[k] * self.enc_weight_dict[k] for k in l_dict if k in self.enc_weight_dict}
-                    l_dict = {k + f'_enc_{i}': v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+                    idx_use, nb_use = indices_enc, num_boxes_enc
+                    meta = self.get_loss_meta_info(loss, aux_outputs, enc_targets, idx_use)
+                    l_dict = self.get_loss(loss, aux_outputs, enc_targets, idx_use, nb_use, **meta)
+                    l_dict_kept = {}
+                    for k in l_dict:
+                        if k.startswith('metric_'):
+                            l_dict_kept[k] = l_dict[k].detach()
+                        elif k in self.enc_weight_dict:
+                            l_dict_kept[k] = l_dict[k] * self.enc_weight_dict[k]
+                    l_dict_kept = {k + f'_enc_{i}': v for k, v in l_dict_kept.items()}
+                    losses.update(l_dict_kept)
 
             if class_agnostic:
                 self.num_classes = orig_num_classes
@@ -951,7 +932,7 @@ class RACE6DCriterion_addr(nn.Module):
         if 'dn_aux_outputs' in outputs and 'dn_meta' in outputs:
             dn_meta = outputs['dn_meta']
             indices = self.get_cdn_matched_indices(dn_meta, targets)
-            # num_boxes는 이미 group_detr로 스케일링됨 → raw count로 DN 정규화
+            # DN은 자체 정규화 필요 → raw GT count 재계산
             raw_num_boxes = sum(len(t["labels"]) for t in targets)
             raw_num_boxes = torch.as_tensor([raw_num_boxes], dtype=torch.float, device=self.device)
             if is_dist_available_and_initialized():
@@ -960,7 +941,7 @@ class RACE6DCriterion_addr(nn.Module):
             dn_num_boxes = raw_num_boxes * dn_meta['dn_num_group']
 
             # cls + bbox losses만 (pose, keypoint 제외)
-            dn_losses = [l for l in self.losses if l in ('vfl', 'mal', 'focal', 'boxes')]
+            dn_losses = [l for l in self.losses if l in ('vfl', 'mal', 'boxes')]
 
             for i, aux_outputs in enumerate(outputs['dn_aux_outputs']):
                 for loss in dn_losses:
@@ -982,23 +963,89 @@ class RACE6DCriterion_addr(nn.Module):
         src_boxes = outputs['pred_boxes'][self._get_src_permutation_idx(indices)]
         target_boxes = torch.cat([t['boxes'][j] for t, (_, j) in zip(targets, indices)], dim=0)
 
-        if self.boxes_weight_format == 'iou':
+        if self.boxes_weight_format in ('iou', 'iou_pose'):
             iou, _ = box_iou(box_cxcywh_to_xyxy(src_boxes.detach()), box_cxcywh_to_xyxy(target_boxes))
-            iou = torch.diag(iou)
+            iou = torch.diag(iou).clamp(min=0)
         elif self.boxes_weight_format == 'giou':
-            iou = torch.diag(generalized_box_iou(\
+            iou = torch.diag(generalized_box_iou(
                 box_cxcywh_to_xyxy(src_boxes.detach()), box_cxcywh_to_xyxy(target_boxes)))
         else:
-            raise AttributeError()
+            raise AttributeError(f'unknown boxes_weight_format: {self.boxes_weight_format}')
 
-        if loss in ('boxes', ):
-            meta = {'boxes_weight': iou}
-        elif loss in ('vfl', ):
-            meta = {'values': iou}
+        # Default values for score target (VFL/MAL): IoU only
+        values = iou
+
+        # Pose-aware score target: values = ADD-R based pose_quality (bbox 배제)
+        if self.boxes_weight_format == 'iou_pose' and self._has_pose_info_available():
+            with torch.no_grad():
+                values = self._compute_pose_quality(outputs, targets, indices)  # [M] in [0,1]
+
+        if loss in ('boxes',):
+            meta = {'boxes_weight': iou}   # bbox loss is always weighted by raw IoU
+        elif loss in ('vfl', 'mal'):
+            meta = {'values': values}
         else:
             meta = {}
-
         return meta
+
+    def _has_pose_info_available(self):
+        """Pose quality requires sym_cache + points_3d_cache + label mapping."""
+        return (bool(self.sym_cache) and bool(self.points_3d_cache)
+                and bool(self.mscoco_label2category))
+
+    def _compute_pose_quality(self, outputs, targets, indices):
+        """Compute per-matched-query ADD-R based pose quality in [0, 1].
+
+        quality = clamp(1 - ADD-R/diameter / pose_quality_scale, 0, 1)   # BOP-style
+        Sym-aware (min over symmetry orbit).
+        """
+        idx = self._get_src_permutation_idx(indices)
+        pred_R = outputs['pred_rotations'][idx].reshape(-1, 3, 3).detach()
+        target_poses = torch.cat([t['poses'][j] for t, (_, j) in zip(targets, indices)], dim=0)
+        target_labels = torch.cat([t['labels'][j] for t, (_, j) in zip(targets, indices)], dim=0)
+        R_gt = target_poses[:, 3:12].reshape(-1, 3, 3)
+        M = pred_R.shape[0]
+        if M == 0:
+            return torch.zeros(0, device=self.device)
+
+        cam_K = torch.cat([t['cam_K'][j] for t, (_, j) in zip(targets, indices)], dim=0).reshape(-1, 3, 3)
+        t_gt_mm = self._c2t_gt(target_poses[:, :3], cam_K)
+        orig_w, orig_h = self._get_orig_size(targets)
+        pred_boxes = outputs['pred_boxes'][idx].detach()
+        t_pred_mm = self._c2t_pred(
+            outputs['pred_translations'][idx].detach(), cam_K, pred_boxes, orig_w, orig_h)
+
+        qualities = torch.zeros(M, device=self.device)
+        # Group by class (one iter per unique class, not per instance) to amortize
+        # dict lookups and eliminate per-instance .item() syncs. Inside each class
+        # group we vectorize over M_cls instances × S symmetries.
+        unique_labels = torch.unique(target_labels)
+        for cls_id in unique_labels:
+            lab = int(cls_id.item())  # 1 sync per class (not per instance)
+            mask = (target_labels == cls_id)
+            sR = self.sym_cache.get(lab)
+            if sR is None or sR.shape[0] == 0:
+                sR = torch.eye(3, device=self.device).unsqueeze(0)
+            model_pts = self.points_3d_cache.get(lab)
+            if model_pts is None:
+                continue
+            model_pts = model_pts.to(self.device)
+            diameter = float(self.diameter_cache.get(lab, 100.0))
+            R_gt_cls = R_gt[mask]                                        # [M_cls, 3, 3]
+            pred_R_cls = pred_R[mask]                                    # [M_cls, 3, 3]
+            t_gt_cls = t_gt_mm[mask]                                     # [M_cls, 3]
+            t_pred_cls = t_pred_mm[mask]                                 # [M_cls, 3]
+            # ADD-R: [M_cls, S] distances, then min over S
+            R_gs = torch.matmul(R_gt_cls.unsqueeze(1), sR.unsqueeze(0))  # [M_cls, S, 3, 3]
+            # pts_pred [M_cls, P, 3]
+            pts_pred = torch.einsum('mij,pj->mpi', pred_R_cls, model_pts) + t_pred_cls.unsqueeze(1)
+            # pts_gs  [M_cls, S, P, 3]
+            pts_gs = torch.einsum('msij,pj->mspi', R_gs, model_pts) + t_gt_cls.unsqueeze(1).unsqueeze(1)
+            dist = (pts_pred.unsqueeze(1) - pts_gs).norm(dim=-1).mean(dim=-1)  # [M_cls, S]
+            addr_rel = dist.min(dim=-1).values / max(diameter, 1e-3)           # [M_cls]
+            qualities[mask] = torch.clamp(1.0 - addr_rel / self.pose_quality_scale, 0.0, 1.0)
+
+        return qualities
 
     @staticmethod
     def get_cdn_matched_indices(dn_meta, targets):

@@ -10,7 +10,7 @@ output_dir: ./output/race6d_r50vd_tless_rgb
 coco_path: ~/Downloads/tless/
 category_file: ./configs/race6d/include/tless2coco_category.yml
 num_classes: 30
-eval_spatial_size: [540, 740] # h w
+eval_spatial_size: [480, 640] # h w (모델 입력 크기, pos embed/anchors)
 
 RACE6D:
   backbone: PResNet
@@ -42,20 +42,20 @@ RACE6DTransformer_DQE:
   num_points: [3, 6, 3]
   num_layers: 3
   vis_enc: True
-  num_queries: 100
+  num_queries: 50
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
 
 RACE6DPostProcessor:
-  num_top_queries: 100
+  num_top_queries: 50
   vis_enc: True
   remap_mscoco_category: False
 
 RACE6DCriterion_addr:
   weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
   losses: ['mal', 'boxes', 'pose', 'keypoint']
-  alpha: 0.75
+  alpha: 1.0
   gamma_pos: 1.0
   gamma_neg: 2.0
 
@@ -64,7 +64,6 @@ RACE6DCriterion_addr:
     weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
     alpha: 0.25
     gamma: 2.0
-    iou_threshold: 0.0
 
 optimizer:
   type: AdamW
@@ -93,8 +92,8 @@ train_dataloader:
     ann_file: ~/Downloads/tless/tless2coco_train_pbr_amodal/annotations/instances_train2017.json
     transforms:
       ops:
-        - {type: Resize, size: [544, 736]}
-        - {type: FilterSmallBoxLowVis, min_size: 10, min_visib: 0.1}
+        - {type: Resize, size: [480, 640]}
+        - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: RandomCoarseDropout}
         - {type: ColorJitter} #ok
         - {type: RandomHSVAdjust} #ok
@@ -107,7 +106,7 @@ train_dataloader:
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
       policy:
         name: stop_epoch
-        epoch: [0, 25]
+        epoch: [0, 30]
         ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
     return_masks: True
     remap_mscoco_category: True
@@ -125,7 +124,8 @@ val_dataloader:
     ann_file: ~/Downloads/tless/tless2coco_test_eval_amodal/annotations/instances_val2017.json
     transforms:
       ops:
-        - {type: Resize, size: [544, 736]}
+        - {type: Resize, size: [480, 640]}
+        - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
     return_masks: True

@@ -64,10 +64,9 @@ RACE6DCriterion_addr:
 
   matcher:
     type: HungarianMatcher
-    weight_dict: {cost_class: 1, cost_bbox: 2, cost_giou: 1, cost_tz: 2}
+    weight_dict: {cost_class: 1, cost_bbox: 2, cost_giou: 1}
     alpha: 0.25
     gamma: 2.0
-    iou_threshold: 0.25
 
 optimizer:
   type: AdamW
@@ -105,8 +104,8 @@ train_dataloader:
         ann_file: ~/Downloads/tudl/tudl2coco_train_pbr_amodal/annotations/instances_train2017.json
         transforms:
           ops:
-            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
             - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
+            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter} #ok
             - {type: RandomHSVAdjust} #ok
@@ -133,12 +132,10 @@ train_dataloader:
         ann_file: ~/Downloads/tudl/tudl2coco_train_real_amodal/annotations/instances_train2017.json
         transforms:
           ops:
-            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-            # Real train tz 편중(p95=1079) → val(p95=1654) 커버 위한 zoom-out.
-            # factor 0.6 → tz×1.67, factor 1.1 → tz×0.91.
-            # augmented p95 ≈ 1798mm로 val 전 구간 포함. policy.ops에는
-            # 넣지 않아 epoch 25+에서도 계속 유지.
+            # Real train tz 편중(p95=1079) → 넓은 범위 커버 위한 zoom-out.
+            # policy.ops에는 넣지 않아 epoch 25+에서도 계속 유지.
             - {type: ZoomPoseAugmentation, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
+            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1, coco_path: ~/Downloads/tudl/, category_file: ./configs/race6d/include/tudl2coco_category.yml, num_fps_points: 1000}
             - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter} #ok
@@ -171,7 +168,7 @@ val_dataloader:
     ann_file: ~/Downloads/tudl/tudl2coco_test_eval_amodal/annotations/instances_val2017.json
     transforms:
       ops:
-        - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
+        - {type: FilterSmallBoxLowVis, min_visib: 0.1}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
     return_masks: True

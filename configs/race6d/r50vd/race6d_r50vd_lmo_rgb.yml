@@ -65,7 +65,6 @@ RACE6DCriterion_addr:
     weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
     alpha: 0.25
     gamma: 2.0
-    iou_threshold: 0.0
 
 optimizer:
   type: AdamW
@@ -103,7 +102,7 @@ train_dataloader:
     ann_file: ~/Downloads/lmo/lmo2coco_train_pbr_amodal/annotations/instances_train2017.json
     transforms:
       ops:
-        - {type: FilterSmallBoxLowVis, min_size: 10, min_visib: 0.1}
+        - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: RandomCoarseDropout}
         - {type: ColorJitter} #ok
         - {type: RandomHSVAdjust} #ok
