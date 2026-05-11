@@ -167,7 +167,7 @@ class PResNet_depth(nn.Module):
         block_nums = ResNet_cfg[depth]
         ch_in = 64
 
-        # 2) conv1 정의에서 첫 conv의 cin을 in_chans로 교체
+        # 2) Replace the first conv's cin with in_chans in conv1 definition
         if variant in ['c', 'd']:
             conv_def = [
                 [in_chans, ch_in // 2, 3, 2, "conv1_1"],
@@ -213,7 +213,7 @@ class PResNet_depth(nn.Module):
             else:
                 state = torch.load(pretrained, map_location='cpu')
 
-            # 4) conv1_1.weight 확장(3→in_chans)
+            # 4) Expand conv1_1.weight (3 → in_chans)
             k = 'conv1.conv1_1.conv.weight'
             if k in state:
                 w = state[k]                       # [Cout, 3, k, k]
@@ -222,7 +222,7 @@ class PResNet_depth(nn.Module):
                 if cin_new != cin_old:
                     W = torch.zeros(cout, cin_new, kh, kw)
                     W[:, :cin_old] = w
-                    # 추가 채널은 RGB 평균으로 초기화(또는 0)
+                    # Initialize extra channels with RGB mean (or zero)
                     if cin_new > cin_old:
                         mean_rgb = w.mean(1, keepdim=True)  # [Cout,1,k,k]
                         W[:, cin_old:] = mean_rgb.expand(-1, cin_new - cin_old, -1, -1)

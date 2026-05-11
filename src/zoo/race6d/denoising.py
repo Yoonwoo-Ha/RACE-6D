@@ -110,7 +110,7 @@ def get_contrastive_denoising_training_group(targets,
 # ======================== Pose-Aware Denoising ========================
 
 def _enc_trans_to_3d(trans_pred, cam_K, bbox, img_w, img_h):
-    """Encoder의 bbox-relative (rx, ry, log_tz)를 3D translation (mm)으로 변환."""
+    """Convert encoder bbox-relative (rx, ry, log_tz) to 3D translation in mm."""
     rx, ry, log_tz = trans_pred[:, 0], trans_pred[:, 1], trans_pred[:, 2]
     fx, fy = cam_K[0, 0], cam_K[1, 1]
     px, py = cam_K[0, 2], cam_K[1, 2]
@@ -125,7 +125,7 @@ def _enc_trans_to_3d(trans_pred, cam_K, bbox, img_w, img_h):
 
 
 def _compute_add_cost(enc_R, enc_t, gt_R, gt_t, model_points):
-    """ADD cost: [N_enc] — 각 encoder pred와 단일 GT 간의 ADD distance."""
+    """ADD cost: [N_enc] — ADD distance between each encoder prediction and a single GT."""
     N = enc_R.shape[0]
     # Transform by prediction: [N, P, 3]
     pts_pred = torch.matmul(enc_R, model_points.T).transpose(-2, -1) + enc_t[:, None, :]
@@ -135,18 +135,18 @@ def _compute_add_cost(enc_R, enc_t, gt_R, gt_t, model_points):
 
 
 def _compute_adds_cost(enc_R, enc_t, gt_R, gt_t, model_points):
-    """ADD-S cost: [N_enc] — nearest-neighbor 기반 대칭 객체용."""
+    """ADD-S cost: [N_enc] — nearest-neighbor based, for symmetric objects."""
     N = enc_R.shape[0]
     P = model_points.shape[0]
     pts_pred = torch.matmul(enc_R, model_points.T).transpose(-2, -1) + enc_t[:, None, :]  # [N, P, 3]
     pts_gt = (gt_R @ model_points.T).T + gt_t  # [P, 3]
-    # nearest neighbor: 각 predicted point에 가장 가까운 GT point
+    # nearest neighbor: find the closest GT point for each predicted point
     dist_matrix = torch.cdist(pts_pred, pts_gt[None].expand(N, -1, -1))  # [N, P, P]
     return dist_matrix.min(dim=-1).values.mean(dim=-1)  # [N]
 
 
 def _get_symmetry_type(label_id, models_info):
-    """객체 대칭성 판별."""
+    """Determine object symmetry type."""
     obj_info = models_info.get(label_id)
     if obj_info is None:
         return 'asymmetric'
@@ -162,10 +162,10 @@ def _get_symmetry_type(label_id, models_info):
 def _match_enc_to_gt(targets, enc_bboxes, enc_trans, enc_rots,
                      points_3d_cache, models_info, mscoco_label2category,
                      img_w, img_h):
-    """Encoder predictions를 GT와 ADD/ADD-R 기반으로 매칭.
+    """Match encoder predictions to GT using ADD/ADD-R cost.
 
     Returns:
-        matched_enc_indices: list[Tensor] — 배치별 [N_gt] 각 GT에 매칭된 encoder index
+        matched_enc_indices: list[Tensor] — per-batch [N_gt] encoder index matched to each GT
     """
     bs = len(targets)
     device = enc_bboxes.device
@@ -209,7 +209,7 @@ def _match_enc_to_gt(targets, enc_bboxes, enc_trans, enc_rots,
         row_ind, col_ind = scipy_linear_sum_assignment(cost_np)
 
         # col_ind → GT index, row_ind → matched encoder index
-        # 결과를 GT 순서로 정렬
+        # sort results in GT order
         enc_idx_for_gt = torch.zeros(N_gt, dtype=torch.long, device=device)
         matched_set = set()
         for r, c in zip(row_ind, col_ind):
@@ -217,7 +217,7 @@ def _match_enc_to_gt(targets, enc_bboxes, enc_trans, enc_rots,
                 enc_idx_for_gt[c] = r
                 matched_set.add(c)
 
-        # 매칭 안 된 GT는 가장 가까운 encoder pred 사용 (fallback)
+        # unmatched GT falls back to the nearest encoder prediction
         for j in range(N_gt):
             if j not in matched_set:
                 enc_idx_for_gt[j] = cost[:, j].argmin()
@@ -237,7 +237,7 @@ def get_pose_denoising_training_group(
     models_info,
     mscoco_label2category,
     num_classes,
-    num_queries,        # normal query 수 (attn_mask 크기 결정용)
+    num_queries,        # number of normal queries (determines attn_mask size)
     class_embed,        # nn.Embedding(num_classes+1, hidden_dim)
     img_w=640,
     img_h=480,
@@ -247,12 +247,12 @@ def get_pose_denoising_training_group(
 ):
     """Pose-aware contrastive denoising training.
 
-    ADD/ADD-R 기반 매칭으로 encoder prediction을 GT와 연결하고,
-    매칭된 encoder의 pose reference (kpt, trans, rot)를 DN query에 사용.
-    bbox/cls에는 기존 CDN 방식의 noise 적용.
+    Match encoder predictions to GT via ADD/ADD-R cost and use
+    the matched encoder pose references (kpt, trans, rot) for DN queries.
+    Apply standard CDN-style noise to bbox/cls.
 
     Returns:
-        dn_logits:      [B, num_dn, C] — class embedding (rtdetrv2 방식)
+        dn_logits:      [B, num_dn, C] — class embedding (rtdetrv2 style)
         dn_bbox_unact:  [B, num_dn, 4] — noised GT bbox (inverse sigmoid)
         dn_kpt:         [B, num_dn, K*2] — encoder kpt predictions
         dn_trans:       [B, num_dn, 3] — encoder trans predictions
@@ -276,13 +276,13 @@ def get_pose_denoising_training_group(
     num_group = 1 if num_group == 0 else num_group
     num_denoising = int(max_gt_num * 2 * num_group)
 
-    # === 1. ADD/ADD-R 기반 매칭: 각 GT에 가장 가까운 encoder prediction 찾기 ===
+    # === 1. ADD/ADD-R matching: find the closest encoder prediction for each GT ===
     matched_enc_indices = _match_enc_to_gt(
         targets, enc_topk_bboxes, enc_topk_trans, enc_topk_rots,
         points_3d_cache, models_info, mscoco_label2category,
         img_w, img_h)
 
-    # === 2. GT + matched encoder features 패딩 ===
+    # === 2. Pad GT + matched encoder features ===
     input_query_class = torch.full([bs, max_gt_num], num_classes, dtype=torch.int32, device=device)
     input_query_bbox = torch.zeros([bs, max_gt_num, 4], device=device)
     pad_gt_mask = torch.zeros([bs, max_gt_num], dtype=torch.bool, device=device)
@@ -303,7 +303,7 @@ def get_pose_denoising_training_group(
             input_enc_trans[i, :num_gt] = enc_topk_trans[i][idx]
             input_enc_rot[i, :num_gt] = enc_topk_rots[i][idx]
 
-    # === 3. CDN 구조: 각 GT에 대해 num_group개의 pos + num_group개의 neg ===
+    # === 3. CDN structure: num_group positive + num_group negative queries per GT ===
     input_query_class = input_query_class.tile([1, 2 * num_group])
     input_query_bbox = input_query_bbox.tile([1, 2 * num_group, 1])
     pad_gt_mask = pad_gt_mask.tile([1, 2 * num_group])
@@ -322,13 +322,13 @@ def get_pose_denoising_training_group(
     dn_positive_idx = torch.nonzero(positive_gt_mask_flat)[:, 1]
     dn_positive_idx = torch.split(dn_positive_idx, [n * num_group for n in num_gts])
 
-    # === 4. Label noise (기존 CDN과 동일) ===
+    # === 4. Label noise (same as standard CDN) ===
     if label_noise_ratio > 0:
         mask = torch.rand_like(input_query_class, dtype=torch.float) < (label_noise_ratio * 0.5)
         new_label = torch.randint_like(mask, 0, num_classes, dtype=input_query_class.dtype)
         input_query_class = torch.where(mask & pad_gt_mask, new_label, input_query_class)
 
-    # === 5. Box noise (기존 CDN과 동일) ===
+    # === 5. Box noise (same as standard CDN) ===
     if box_noise_scale > 0:
         known_bbox = box_cxcywh_to_xyxy(input_query_bbox)
         diff = torch.tile(input_query_bbox[..., 2:] * 0.5, [1, 1, 2]) * box_noise_scale
@@ -342,7 +342,7 @@ def get_pose_denoising_training_group(
 
     input_query_bbox_unact = inverse_sigmoid(input_query_bbox)
 
-    # Content: class embedding (기존 CDN 방식)
+    # Content: class embedding (standard CDN style)
     dn_class_logits = class_embed(input_query_class)
 
     # === 6. Attention mask: DN isolation + Group DETR isolation ===

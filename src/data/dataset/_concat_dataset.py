@@ -7,7 +7,7 @@ from ...core import register
 @register()
 class ConcatDataset:
     """
-    여러 dataset을 단순히 일렬로 이어붙이는 Dataset.
+    Dataset that concatenates multiple datasets in sequence.
     """
 
     __share__ = ["num_classes"]

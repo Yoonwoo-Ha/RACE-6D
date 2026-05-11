@@ -75,7 +75,7 @@ class DataLoader(data.DataLoader):
 def batch_image_collate_fn(items):
     """only batch image
     """
-    # 디버깅을 위한 데이터 검증
+    # Validate data for debugging
     for i, item in enumerate(items):
         if not isinstance(item, (tuple, list)) or len(item) < 2:
             print(f"Invalid item format at index {i}: {type(item)}")
@@ -111,7 +111,7 @@ class BatchImageCollateFunction(BaseCollateFunction):
         # self.interpolation = interpolation
 
     def __call__(self, items):
-        # 디버깅을 위한 데이터 검증
+        # Validate data for debugging
         for i, item in enumerate(items):
             if not isinstance(item, (tuple, list)) or len(item) < 2:
                 print(f"Invalid item format at index {i}: {type(item)}")

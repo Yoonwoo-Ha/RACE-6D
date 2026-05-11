@@ -471,7 +471,7 @@ class RACE6DTransformer_DQE(nn.Module):
         self.num_queries = num_queries
         self.eps = eps
         self.num_layers = num_layers
-        # eval_spatial_size: 실제 모델 입력 크기 (anchors/pos embed 용)
+        # eval_spatial_size: actual model input size (for anchors/pos embed)
         self.eval_spatial_size = eval_spatial_size
         self.aux_loss = aux_loss
         self.vis_enc = vis_enc
@@ -548,7 +548,7 @@ class RACE6DTransformer_DQE(nn.Module):
             self.register_buffer('anchors_bbox', anchors_bbox)
             self.register_buffer('valid_mask', valid_mask)
 
-        # pose info (buffer로 저장 → checkpoint에 포함)
+        # pose info (stored as buffer → included in checkpoint)
         self._has_pose_info = coco_path is not None
         if self._has_pose_info:
             self._load_pose_info(coco_path, category_file, max_sym_disc_step)
@@ -560,7 +560,7 @@ class RACE6DTransformer_DQE(nn.Module):
         bias = bias_init_with_prob(0.01)
         identity_r6d = torch.tensor([1., 0., 0., 0., 1., 0.])
 
-        # Encoder heads 초기화
+        # Initialize encoder heads
         init.constant_(self.enc_score_head.bias, bias)
         init.constant_(self.enc_bbox_head.layers[-1].weight, 0)
         init.constant_(self.enc_bbox_head.layers[-1].bias, 0)
@@ -571,7 +571,7 @@ class RACE6DTransformer_DQE(nn.Module):
         init.constant_(self.enc_rot_head.layers[-1].weight, 0)
         self.enc_rot_head.layers[-1].bias.data.copy_(identity_r6d + torch.randn(6) * 0.01)
 
-        # Decoder heads 초기화 (헤드별 특성에 맞게 설정)
+        # Initialize decoder heads (configured per head characteristics)
         for _cls, _box, _kpt, _trans, _reg, _rot in zip(self.dec_score_head, self.dec_bbox_head, self.dec_kpt_head, self.dec_trans_xy_head, self.dec_reg_head, self.dec_rot_head):
             init.constant_(_cls.bias, bias)
             init.constant_(_box.layers[-1].weight, 0)
@@ -596,7 +596,7 @@ class RACE6DTransformer_DQE(nn.Module):
     # ==================== Pose Info Loading ====================
 
     def _load_pose_info(self, coco_path, category_file, max_sym_disc_step=0.01):
-        """Pose 관련 데이터를 로드하고 register_buffer로 저장"""
+        """Load pose-related data and store via register_buffer."""
         import yaml
         import open3d as o3d
 
@@ -619,7 +619,7 @@ class RACE6DTransformer_DQE(nn.Module):
         self.register_buffer('keypoints_3d', keypoints_3d)
         self.edges_mask = edges_mask
 
-        # 3. models_info 로드
+        # 3. Load models_info
         models_info_path = os.path.join(coco_path, 'models', 'models_info.json')
         if os.path.exists(models_info_path):
             with open(models_info_path, 'r') as f:
@@ -630,7 +630,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
         self.models_info = {}
 
-        # 4. Per-class data 수집 (임시 dict → 나중에 padded tensor로 변환)
+        # 4. Collect per-class data (temporary dict → convert to padded tensor later)
         C = len(valid_label_ids)
         num_model_points = 1500
 
@@ -669,11 +669,11 @@ class RACE6DTransformer_DQE(nn.Module):
             sym_mats = self._build_symmetry_matrices(obj_info, max_sym_disc_step)
             sym_list.append(torch.stack(sym_mats, 0))  # [S_i, 3, 3]
 
-        # 5. Padded tensors로 변환 + register_buffer
+        # 5. Convert to padded tensors and register_buffer
         self.register_buffer('diameters', torch.tensor(diameters_list, dtype=torch.float32))  # [C]
         self.register_buffer('points_3d', torch.stack(points_3d_list, 0))  # [C, 1500, 3]
 
-        # sym_rotations: class별 대칭 수가 다르므로 padding
+        # sym_rotations: number of symmetries varies per class, so padding is needed
         max_S = max(s.shape[0] for s in sym_list)
         sym_padded = torch.zeros(C, max_S, 3, 3)
         sym_counts = torch.zeros(C, dtype=torch.long)
@@ -686,7 +686,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
     @staticmethod
     def _load_cam_K(coco_path):
-        """scene_camera.json에서 cam_K 로드"""
+        """Load cam_K from scene_camera.json."""
         test_path = os.path.join(coco_path, 'test')
         if not os.path.exists(test_path):
             raise FileNotFoundError(f"Test path not found: {test_path}")
@@ -702,7 +702,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
     @staticmethod
     def _load_model_points(o3d, file_path, num_samples=1500):
-        """PLY 파일에서 3D points 로드 + FPS 샘플링"""
+        """Load 3D points from PLY file and apply FPS sampling."""
         pcd = o3d.io.read_point_cloud(file_path)
         points = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
         if len(points) == 0:
@@ -719,7 +719,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
     @staticmethod
     def _load_keypoints_3d_and_edges(coco_path):
-        """JSON 파일에서 32개 3D 키포인트와 edges_mask 로드"""
+        """Load 32 3D keypoints and edges_mask from JSON file."""
         keypoints_path = os.path.join(coco_path, 'cached_keypoints_3d_edge.json')
         with open(keypoints_path, 'r') as f:
             data = json.load(f)
@@ -734,19 +734,19 @@ class RACE6DTransformer_DQE(nn.Module):
 
     @staticmethod
     def _build_symmetry_matrices(obj_info, max_sym_disc_step=0.01):
-        """models_info에서 대칭 변환 행렬 리스트 생성.
-        BOP toolkit 표준: max_sym_disc_step=0.01 (diameter 대비 비율)
+        """Build list of symmetry rotation matrices from models_info.
+        BOP toolkit standard: max_sym_disc_step=0.01 (fraction of diameter)
         → discrete_steps = ceil(π / 0.01) = 315, angular_step ≈ 1.14°
         """
-        sym_mats = [torch.eye(3)]  # identity 항상 포함
+        sym_mats = [torch.eye(3)]  # identity always included
 
-        # 이산 대칭
+        # Discrete symmetries
         if 'symmetries_discrete' in obj_info:
             for sym in obj_info['symmetries_discrete']:
                 sym_mat = torch.tensor(sym, dtype=torch.float32).reshape(4, 4)
                 sym_mats.append(sym_mat[:3, :3])
 
-        # 연속 대칭 (BOP toolkit 공식: discrete_steps = ceil(π / max_sym_disc_step))
+        # Continuous symmetries (BOP toolkit formula: discrete_steps = ceil(π / max_sym_disc_step))
         if 'symmetries_continuous' in obj_info and max_sym_disc_step is not None:
             for sym in obj_info['symmetries_continuous']:
                 axis = np.array(sym['axis'], dtype=np.float64)
@@ -765,9 +765,9 @@ class RACE6DTransformer_DQE(nn.Module):
 
         return sym_mats
 
-    # Dict conversion helpers (criterion 등 외부에서 사용)
+    # Dict conversion helpers (used externally by criterion etc.)
     def get_sym_cache(self) -> Dict[int, torch.Tensor]:
-        """buffer → {label_id: [S, 3, 3]} dict 변환"""
+        """Convert buffer → {label_id: [S, 3, 3]} dict."""
         result = {}
         valid_label_ids = list(self.mscoco_label2category.keys())
         for i, label_id in enumerate(valid_label_ids):
@@ -776,7 +776,7 @@ class RACE6DTransformer_DQE(nn.Module):
         return result
 
     def get_points_3d_cache(self) -> Dict[int, torch.Tensor]:
-        """buffer → {label_id: [P, 3]} dict 변환"""
+        """Convert buffer → {label_id: [P, 3]} dict."""
         result = {}
         valid_label_ids = list(self.mscoco_label2category.keys())
         for i, label_id in enumerate(valid_label_ids):
@@ -784,7 +784,7 @@ class RACE6DTransformer_DQE(nn.Module):
         return result
 
     def get_diameter_cache(self) -> Dict[int, float]:
-        """buffer → {label_id: float} dict 변환"""
+        """Convert buffer → {label_id: float} dict."""
         result = {}
         valid_label_ids = list(self.mscoco_label2category.keys())
         for i, label_id in enumerate(valid_label_ids):
@@ -815,19 +815,19 @@ class RACE6DTransformer_DQE(nn.Module):
             in_channels = self.hidden_dim
 
     def _get_encoder_input(self, feats):
-        """최적화된 버전 - 배치 처리"""
+        """Optimized version - batch processing."""
         proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
         feat_flattens = []
         spatial_shapes = []
         
         for feat in proj_feats:
             B, C, H, W = feat.shape
-            # contiguous view 사용으로 메모리 복사 최소화
+            # use contiguous view to minimize memory copies
             feat_flat = feat.view(B, C, H * W).transpose(1, 2)  # [B, H*W, C]
             feat_flattens.append(feat_flat)
             spatial_shapes.append([H, W])
         
-        # 미리 총 길이 계산하여 메모리 할당 최적화
+        # pre-calculate total length to optimize memory allocation
         total_length = sum(f.shape[1] for f in feat_flattens)
         B, C = feat_flattens[0].shape[0], feat_flattens[0].shape[2]
         
@@ -845,7 +845,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
     def _generate_anchors_bbox(self, spatial_shapes=None, grid_size=0.05, 
                                     dtype=torch.float32, device='cpu'):
-        """최적화된 앵커 생성"""
+        """Optimized anchor generation."""
         if spatial_shapes is None:
             spatial_shapes = []
             eval_h, eval_w = self.eval_spatial_size
@@ -854,21 +854,21 @@ class RACE6DTransformer_DQE(nn.Module):
         all_anchors = []
         
         for lvl, (h, w) in enumerate(spatial_shapes):
-            # 더 효율적인 그리드 생성
+            # more efficient grid generation
             y_coords = torch.arange(h, dtype=dtype, device=device)
             x_coords = torch.arange(w, dtype=dtype, device=device)
             
-            # meshgrid 최적화
+            # optimized meshgrid
             grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
             
-            # 한번에 정규화
+            # normalize in one step
             grid_xy = torch.stack([grid_x, grid_y], dim=-1)
             grid_xy_norm = (grid_xy + 0.5) / torch.tensor([w, h], dtype=dtype, device=device)
             
-            # 한번에 wh 계산
+            # compute wh in one step
             wh = torch.full_like(grid_xy_norm, grid_size * (2.0 ** lvl))
             
-            # 한번에 concat
+            # concat in one step
             lvl_anchors = torch.cat([grid_xy_norm, wh], dim=-1).view(1, h * w, 4)
             all_anchors.append(lvl_anchors)
 
@@ -1001,7 +1001,7 @@ class RACE6DTransformer_DQE(nn.Module):
             if dn_result[0] is not None:
                 dn_logits, dn_bbox_unact, dn_kpt, dn_trans, dn_rot, attn_mask, dn_meta = dn_result
 
-                # DN content = class embedding (rtdetrv2 방식)
+                # DN content = class embedding (rtdetrv2 style)
                 init_ref_contents = torch.cat([dn_logits, init_ref_contents], dim=1)
                 init_ref_points_unact = torch.cat([dn_bbox_unact, init_ref_points_unact], dim=1)
                 init_ref_keypoints = torch.cat([dn_kpt, init_ref_keypoints], dim=1)

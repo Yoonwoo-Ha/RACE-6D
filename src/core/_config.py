@@ -147,11 +147,11 @@ class BaseConfig(object):
         
         datasets = []
         for domain_cfg in mixed_cfg['datasets']:
-            # 각 domain dataset 생성
+            # Create each domain dataset
             dataset = create('dataset', {**self.global_cfg, 'dataset': domain_cfg})
             datasets.append(dataset)
         
-        # Mixed dataset 생성
+        # Create mixed dataset
         mixed_dataset = MixedDomainDataset(
             datasets=datasets,
             sampling_ratios=mixed_cfg['sampling_ratios']

@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from pytorch3d.transforms import euler_angles_to_matrix
 
 def distance2depth(initial_log_depth, offset, reg_scale=1.0):
-    # initial_log_depth: [B,N,1], 이미 log(tz)
-    # offset: integral 결과. 이건 "log-step"으로 해석
+    # initial_log_depth: [B,N,1], already in log(tz) space
+    # offset: integral result, interpreted as a "log-step"
     log_depth = initial_log_depth + offset / reg_scale
     return log_depth
 
@@ -25,19 +25,19 @@ def depth_ratio_weighting_focus_center(
     device='cpu',
     dtype=torch.float32,
 ):
-    # 0..1 균등
+    # uniform in [0..1]
     t = torch.linspace(0, 1, reg_max + 1, device=device, dtype=dtype)
-    # 가운데(0.5)로 밀어넣기: sharp가 클수록 1.0 부근이 촘촘
+    # push toward center (0.5): higher sharp -> denser near 1.0
     s = (torch.abs(t - 0.5) * 2) ** (1.0 / sharp)
     t = 0.5 + (t - 0.5) * s
 
     log_r_min = math.log(r_min)
     log_r_max = math.log(r_max)
-    log_r = log_r_min + (log_r_max - log_r_min) * t  # log-space에서 0.5x..2x
-    return log_r  # 이걸 integral의 project로 쓴다
+    log_r = log_r_min + (log_r_max - log_r_min) * t  # 0.5x..2x in log-space
+    return log_r  # used as the project weighting for the integral
 
 def inverse_sigmoid(x: torch.Tensor, eps: float=1e-4) -> torch.Tensor:
-    x = x.clip(min=eps, max=1-eps)  # 양쪽 클리핑
+    x = x.clip(min=eps, max=1-eps)  # clip both sides
     return torch.log(x / (1 - x))
 
 def bias_init_with_prob(prior_prob=0.01):

@@ -68,7 +68,7 @@ def plot_bboxes(clses, image, bboxes):
     colors = COLORS * 100
 
     for cls, bbox, c in zip(clses, bboxes, colors):
-        # bbox는 [x_min, y_min, width, height] 형식이어야 합니다.
+        # bbox must be in [x_min, y_min, width, height] format.
         x_min, y_min, width, height = bbox
         x_max = x_min + width
         y_max = y_min + height
@@ -88,7 +88,7 @@ def plot_bboxes(ax, target):
     bboxes = target['boxes']
 
     for bbox, c in zip(bboxes, colors):
-        # bbox는 [x_min, y_min, width, height] 형식이어야 합니다.
+        # bbox must be in [x_min, y_min, width, height] format.
         if ax.get_title() == 'Original Image':
             bbox = box_xyxy_to_mxmywh(bbox)
         elif ax.get_title() == 'Rotated Image':
@@ -117,7 +117,7 @@ def plot_results_comparison_bbox(original_img, rotated_img, original_target, rot
     
     if save_path:
         plt.savefig(save_path, dpi=100, bbox_inches='tight', pad_inches=0.1)
-        plt.close()  # 메모리 절약을 위해 figure 닫기
+        plt.close()  # Close figure to save memory
     else:
         plt.show()
 
@@ -142,14 +142,14 @@ def plot_results_comparison_points(original_img, rotated_img, points_original, o
     
     if save_path:
         plt.savefig(save_path, dpi=100, bbox_inches='tight', pad_inches=0.1)
-        plt.close()  # 메모리 절약을 위해 figure 닫기
+        plt.close()  # Close figure to save memory
     else:
         plt.show()
 
 def plot_bboxes_only(image, bboxes, condition=None, fill=False, save=False):
     plt.figure(figsize=(16,10))
     dpi = 100
-    # fig_width = 640 / dpi  # 인치 단위로 계산
+    # fig_width = 640 / dpi  # calculate in inches
     # fig_height = 480 / dpi
     # plt.figure(figsize=(fig_width, fig_height), dpi=dpi)
     plt.imshow(image)
@@ -159,7 +159,7 @@ def plot_bboxes_only(image, bboxes, condition=None, fill=False, save=False):
     colors = COLORS * 100
 
     for bbox, c in zip(bboxes, colors):
-        # bbox는 [x_min, y_min, width, height] 형식이어야 합니다.
+        # bbox must be in [x_min, y_min, width, height] format.
         if condition is not None:
             if condition == 'xywh':
                 x_min, y_min, width, height = bbox
@@ -233,13 +233,13 @@ def plot_results_with_points_anno(pil_img, prob, points, translation_matrix, rot
 
 def _c2t(translation, cam_K, bbox_info=None):
         """
-        벡터화된 정규화된 상대 좌표를 3D 공간 좌표로 변환
-        ConvertPose의 역변환을 수행
-        translation: rx, ry, rz (정규화된 상대 좌표)
+        Converts vectorized normalized relative coordinates to 3D world coordinates.
+        Performs the inverse transform of ConvertPose.
+        translation: rx, ry, rz (normalized relative coordinates)
         cam_K: fx, fy, px, py
-        bbox_info: [cx, cy, w, h] (정규화된 좌표 [0,1] 범위)
+        bbox_info: [cx, cy, w, h] (normalized coordinates in [0,1] range)
         """
-        # 입력이 1D인 경우 2D로 확장
+        # Expand to 2D if input is 1D
         if translation.dim() == 1:
             translation = translation.unsqueeze(0)
             squeeze_output = True
@@ -248,7 +248,7 @@ def _c2t(translation, cam_K, bbox_info=None):
         
         rx, ry, rz = translation[:, 0], translation[:, 1], translation[:, 2]
         
-        # 카메라 내부 파라미터 (벡터화)
+        # Camera intrinsic parameters (vectorized)
         fx = cam_K[0, 0]
         fy = cam_K[1, 1]
         px = cam_K[0, 2]
@@ -257,15 +257,15 @@ def _c2t(translation, cam_K, bbox_info=None):
         if bbox_info.dim() == 1:
             bbox_info = bbox_info.unsqueeze(0)
 
-        # bbox_info가 정규화된 좌표 [0,1] 범위인지 확인하고 픽셀 좌표로 변환
+        # Check if bbox_info is in normalized [0,1] range and convert to pixel coordinates
         if bbox_info.max() <= 1.0:
-            # 정규화된 [cx, cy, w, h] 좌표를 픽셀 좌표로 변환
+            # Convert normalized [cx, cy, w, h] coordinates to pixel coordinates
             cxbbox = bbox_info[:, 0] * 640  # cx
             cybbox = bbox_info[:, 1] * 480  # cy
             wbbox = bbox_info[:, 2] * 640   # w
             hbbox = bbox_info[:, 3] * 480   # h
         else:
-            # 이미 픽셀 좌표인 [cx, cy, w, h] 형태
+            # Already in pixel coordinates [cx, cy, w, h] format
             cxbbox = bbox_info[:, 0]
             cybbox = bbox_info[:, 1]
             wbbox = bbox_info[:, 2]
@@ -273,7 +273,7 @@ def _c2t(translation, cam_K, bbox_info=None):
 
         tz = rz * 1000.0
         
-        # ✅ 올바른 역변환 공식
+        # Correct inverse transform formula
         tx = ((rx * wbbox + cxbbox - px) * tz) / fx
         ty = ((ry * hbbox + cybbox - py) * tz) / fy
         
@@ -290,9 +290,9 @@ def plot_points(ax, points, target):
     
     if ax.get_title() == 'Original Image':
         # ===============================================
-        # Original Image: 변환 전 데이터
-        # - Boxes: [x1, y1, x2, y2] (픽셀 좌표)
-        # - Poses: [tx, ty, tz, R...] (절대 좌표)
+        # Original Image: data before transformation
+        # - Boxes: [x1, y1, x2, y2] (pixel coordinates)
+        # - Poses: [tx, ty, tz, R...] (absolute coordinates)
         # ===============================================
         
         if target['poses'].shape[1] == 12:  # [tx, ty, tz, R(3x3)]
@@ -304,18 +304,18 @@ def plot_points(ax, points, target):
             
     elif ax.get_title() == 'Rotated Image':
         # ===============================================
-        # Rotated Image: 변환 후 데이터
-        # - Boxes: [cx, cy, w, h] (정규화된 좌표)
-        # - Poses: [rx, ry, rz, R6D] (상대 좌표)
+        # Rotated Image: data after transformation
+        # - Boxes: [cx, cy, w, h] (normalized coordinates)
+        # - Poses: [rx, ry, rz, R6D] (relative coordinates)
         # ===============================================
         
         if target['poses'].shape[1] == 9:  # [rx, ry, rz, R6D(6)]
             rotation_matrix = rotation_6d_to_matrix(target['poses'][:, 3:]).reshape(-1, 3, 3)
-            # 정규화된 상대 좌표를 절대 좌표로 변환
+            # Convert normalized relative coordinates to absolute coordinates
             translation_matrix = _c2t(target['poses'][:, :3], cam_K_0, target['boxes'])
         elif target['poses'].shape[1] == 12:  # [rx, ry, rz, R(3x3)]
             rotation_matrix = target['poses'][:, 3:].reshape(-1, 3, 3)
-            # 정규화된 상대 좌표를 절대 좌표로 변환
+            # Convert normalized relative coordinates to absolute coordinates
             translation_matrix = _c2t(target['poses'][:, :3], cam_K_0, target['boxes'])
         else:
             print(f"Unexpected pose format for Rotated Image: {target['poses'].shape}")
@@ -329,7 +329,7 @@ def plot_points(ax, points, target):
     for cl, rot, tran, col in zip(classes, rotation_matrix, translation_matrix, colors):
         cl = int(cl)
         
-        # 클래스 키가 존재하는지 확인
+        # Check if the class key exists
         if cl not in points:
             print(f"Warning: Class {cl} not found in points dictionary")
             continue
@@ -338,14 +338,14 @@ def plot_points(ax, points, target):
         rotation_matrix_np = rot.detach().cpu().numpy()
         points_cl = points[cl]
         
-        # 3D 포인트 변환
+        # Transform 3D points
         points_3d_transformed = np.dot(rotation_matrix_np, points_cl.T).T + translation_matrix_np
         
-        # 2D 투영
+        # Project to 2D
         cam_K_0_np = np.array(cam_K_0.detach().cpu().numpy())
         points_2D = project_to_image_plane(points_3d_transformed, cam_K_0_np)
         
-        # 화면 범위 내의 점들만 표시
+        # Display only points within screen bounds
         valid_points = (points_2D[:, 0] >= 0) & (points_2D[:, 0] < 640) & \
                       (points_2D[:, 1] >= 0) & (points_2D[:, 1] < 480)
         
@@ -353,7 +353,7 @@ def plot_points(ax, points, target):
             ax.scatter(points_2D[valid_points, 0], points_2D[valid_points, 1], color=col, s=2)
         else:
             print(f"Class {cl}: No valid points projected (all out of bounds)")
-            # 첫 몇 개 점의 좌표를 출력해서 디버깅
+            # Print coordinates of first few points for debugging
             print(f"  Sample 2D points: {points_2D[:3]}")
             print(f"  Translation: {translation_matrix_np}")
             print(f"  3D transformed sample: {points_3d_transformed[:3]}")
@@ -388,10 +388,10 @@ def plot_results_with_target(pil_img, points, target):
     colors = COLORS * 100
 
     translation_matrix = target['poses'][:, :3]
-    # rotation이 R6D 포맷인 경우
+    # If rotation is in R6D format
     if target['poses'].shape[1] == 9:  # translation(3) + R6D(6)
         rotation_matrix = rotation_6d_to_matrix(target['poses'][:, 3:9])
-    else:  # 기존 rotation matrix 포맷
+    else:  # existing rotation matrix format
         rotation_matrix = target['poses'][:, 3:].reshape(-1, 3, 3)
     classes = target['labels']
     cam_K = target['cam_K']

@@ -46,7 +46,7 @@ RACE6DTransformer_DQE:
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
-  num_denoising: 10      # DN query 수 (0이면 비활성)                                                                                                                                                                                                                                       
+  num_denoising: 10      # number of DN queries (0 = disabled)
   label_noise_ratio: 0.5
   box_noise_scale: 1.0
 
@@ -133,8 +133,8 @@ train_dataloader:
         ann_file: ~/Downloads/tudl/tudl2coco_train_real_amodal/annotations/instances_train2017.json
         transforms:
           ops:
-            # Real train tz 편중(p95=1079) → 넓은 범위 커버 위한 zoom-out.
-            # policy.ops에는 넣지 않아 epoch 25+에서도 계속 유지.
+            # Real train tz is skewed (p95=1079) → zoom-out to cover a wider range.
+            # Not added to policy.ops so it persists beyond epoch 25.
             - {type: PoseAugmentation, per_instance: false, rotation_range: 0.0, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
             - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}

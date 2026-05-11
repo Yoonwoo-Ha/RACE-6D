@@ -190,10 +190,10 @@ def get_coco_api_from_dataset(dataset):
         if isinstance(dataset, torch.utils.data.Subset):
             dataset = dataset.dataset
     if isinstance(dataset, torchvision.datasets.CocoDetection):
-        # NOTE: COCO eval에만 적용되는 필터.
-        # BOP convention: visibility<0.1 또는 ignore=True인 ann은 "평가 대상 아님"으로 취급.
-        # pycocotools는 custom ignore 필드를 respect하지 않으므로 iscrowd=1로 마킹해야 함.
-        # dataset.coco 원본은 건드리지 않고 deep copy한 객체만 수정 → training/target dict에는 영향 없음.
+        # NOTE: This filter applies to COCO eval only.
+        # BOP convention: anns with visibility<0.1 or ignore=True are treated as "not eval targets".
+        # pycocotools does not respect a custom ignore field, so they must be marked as iscrowd=1.
+        # Only the deep-copied object is modified; dataset.coco is untouched -> no effect on training/target dicts.
         coco_gt = copy.deepcopy(dataset.coco)
         n_ignored = 0
         for ann in coco_gt.anns.values():

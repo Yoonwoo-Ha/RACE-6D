@@ -101,7 +101,7 @@ def train_one_epoch(
         if ema is not None:
             ema.update(model)
 
-        # LR scheduling: iter 기반 (FlatCosineAnnealingLR) 또는 기존 warmup
+        # LR scheduling: iter-based (FlatCosineAnnealingLR) or legacy warmup
         if lr_scheduler is not None and getattr(lr_scheduler, '_iter_based', False):
             lr_scheduler.step(global_step, optimizer)
         elif lr_warmup_scheduler is not None:
@@ -149,7 +149,7 @@ def evaluate(
     coco_evaluator: CocoEvaluator,
     device,
 ):
-    """평가 함수 — criterion loss + COCO eval만 수행"""
+    """Evaluation function — runs criterion loss and COCO eval only."""
     model.eval()
     criterion.eval()
     coco_evaluator.cleanup()

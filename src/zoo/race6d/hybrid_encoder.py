@@ -277,7 +277,7 @@ class HybridEncoder(nn.Module):
         self.use_encoder_idx = use_encoder_idx
         self.num_encoder_layers = num_encoder_layers
         self.pe_temperature = pe_temperature
-        # eval_spatial_size: 실제 모델 입력 크기 (pos embed/anchor 용)
+        # eval_spatial_size: actual model input size (for pos embed/anchors)
         self.eval_spatial_size = eval_spatial_size
         self.out_channels = [hidden_dim for _ in range(len(in_channels))]
         self.out_strides = feat_strides

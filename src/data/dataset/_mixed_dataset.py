@@ -10,7 +10,7 @@ from ...core import register
 @register()
 class MixedDomainDataset(Dataset):
     """
-    여러 도메인의 dataset을 특정 비율로 샘플링
+    Sample multiple domain datasets at specified ratios.
     """
 
     __share__ = ["num_classes"]
@@ -19,7 +19,7 @@ class MixedDomainDataset(Dataset):
         """
         Args:
             datasets: list of Dataset objects or configs (dicts)
-            sampling_ratios: list of float, 각 dataset의 샘플링 비율
+            sampling_ratios: list of float, sampling ratio for each dataset
             use_real_length: if True, use only Real dataset length (not sum of all)
         """
         from ...core.workspace import GLOBAL_CONFIG
@@ -38,10 +38,10 @@ class MixedDomainDataset(Dataset):
         self.sampling_ratios = sampling_ratios
         self.use_real_length = use_real_length
 
-        # 각 dataset의 크기
+        # Size of each dataset
         self.dataset_sizes = [len(d) for d in self.datasets]
 
-        # 전체 epoch 크기 설정
+        # Set the total epoch size
         if self.use_real_length and hasattr(self, '_real_length'):
             self.total_size = self._real_length
             print(f"Mixed Dataset Info (Real only mode):")
@@ -53,7 +53,7 @@ class MixedDomainDataset(Dataset):
             print(f"  Dataset {i}: {size} samples, ratio: {ratio:.2%}")
         print(f"  Total virtual size: {self.total_size}")
 
-        # 초기 인덱스 생성
+        # Initialize indices
         self.indices = None
         self.set_epoch(0)
 
@@ -120,39 +120,39 @@ class MixedDomainDataset(Dataset):
         return module(**module_kwargs)
 
     def _generate_indices(self, epoch):
-        """Epoch마다 데이터셋 샘플링 인덱스를 미리 생성하여 골고루 뽑히도록 함"""
+        """Pre-generate dataset sampling indices per epoch so samples are drawn evenly."""
         rng = np.random.RandomState(epoch)
 
         all_indices = []
 
-        # 각 데이터셋별 할당량 계산
+        # Compute per-dataset allocation
         counts = [int(self.total_size * r) for r in self.sampling_ratios]
-        # 반올림 오차 보정 (마지막 데이터셋에 몰아주기)
+        # Correct rounding error (assign remainder to the last dataset)
         counts[-1] = self.total_size - sum(counts[:-1])
 
         for i, (size, count) in enumerate(zip(self.dataset_sizes, counts)):
             if size == 0 or count == 0:
                 continue
 
-            # 1. 필요한 만큼 반복 (Full repeats)
+            # 1. Repeat as needed (full repeats)
             n_repeat = count // size
             n_remain = count % size
 
             indices = []
 
-            # 전체 데이터셋을 n_repeat 번 추가 (매번 셔플)
+            # Add the full dataset n_repeat times (shuffle each time)
             for _ in range(n_repeat):
                 perm = rng.permutation(size)
                 indices.append(perm)
 
-            # 남은 개수만큼 추가 (셔플 후 앞부분)
+            # Add the remaining count (front of a fresh shuffle)
             if n_remain > 0:
                 perm = rng.permutation(size)
                 indices.append(perm[:n_remain])
 
             if indices:
                 indices = np.concatenate(indices)
-                # (dataset_idx, sample_idx) 형태로 저장
+                # Store as (dataset_idx, sample_idx) pairs
                 d_idxs = np.full(len(indices), i, dtype=np.int32)
                 combined = np.stack((d_idxs, indices), axis=1)
                 all_indices.append(combined)
@@ -167,30 +167,30 @@ class MixedDomainDataset(Dataset):
         return self.total_size
 
     def __getitem__(self, idx):
-        # 미리 생성된 매핑 테이블 사용
+        # Use the pre-generated mapping table
         if self.indices is None:
             self._generate_indices(0)
 
         indices = self.indices
         assert indices is not None
         dataset_idx, sample_idx = indices[idx]
-        # numpy.int64 -> int 변환 (torchvision 호환성)
+        # numpy.int64 -> int conversion (torchvision compatibility)
         return self.datasets[dataset_idx][int(sample_idx)]
 
     @property
     def coco(self):
-        """CocoDetection 호환성을 위해"""
+        """For CocoDetection compatibility."""
         if self.datasets:
             return self.datasets[0].coco
         return None
 
     def set_epoch(self, epoch):
-        """epoch 설정 전파 및 인덱스 재생성"""
-        # 하위 데이터셋에 전파
+        """Propagate the epoch setting and regenerate indices."""
+        # Propagate to child datasets
         for dataset in self.datasets:
             if hasattr(dataset, "set_epoch"):
                 dataset.set_epoch(epoch)
 
-        # 현재 epoch에 맞는 인덱스 매핑 생성
+        # Generate the index mapping for the current epoch
         self._generate_indices(epoch)
 

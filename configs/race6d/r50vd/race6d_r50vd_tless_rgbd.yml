@@ -10,7 +10,7 @@ output_dir: ./output/race6d_r50vd_tless_rgbd
 coco_path: ~/Downloads/tless/
 category_file: ./configs/race6d/include/tless2coco_category.yml
 num_classes: 30
-eval_spatial_size: [480, 640] # h w (모델 입력 크기, pos embed/anchors)
+eval_spatial_size: [480, 640] # h w (model input size, pos embed/anchors)
 
 RACE6D:
   backbone: PResNet_depth
@@ -47,7 +47,7 @@ RACE6DTransformer_DQE:
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
-  num_denoising: 0      # DN query 수 (0이면 비활성)
+  num_denoising: 0      # number of DN queries (0 = disabled)
   label_noise_ratio: 0.5
   box_noise_scale: 1.0
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center"> <ins>RACE6D</ins> 🎯<br>Real-time Attention-based Category 6D Pose Estimation</h1>
+  <h1 align="center"> <ins>RACE-6D</ins> 🎯<br>Real-time Accurate Coarse-to-finE object 6D Pose Transformer</h1>
   <p align="center">
     A transformer-based framework for 6D object pose estimation, extending RT-DETR with parallel pose heads to predict 3D rotation and translation of known objects from RGB / RGB-D images.
   </p>
@@ -13,7 +13,7 @@
   </div>
 </p>
 
-RACE6D is a 6D object pose estimation framework built on PyTorch. It extends **RT-DETR** (Real-Time Detection Transformer) with parallel pose-estimation heads (rotation, translation, keypoints, visibility) and is designed for the **BOP benchmark** datasets: LMO, YCBV, T-LESS, TUDL, HB, and IC-BIN.
+RACE6D is a 6D object pose estimation framework built on PyTorch. It extends **RT-DETR** (Real-Time Detection Transformer) with parallel pose-estimation heads (rotation, translation, keypoints, visibility) and is designed for the **BOP benchmark** datasets: LMO, YCBV, T-LESS, TUDL, HB, IC-BIN, and ITODD.
 
 ## 🔍 Overview
 
@@ -66,6 +66,7 @@ Download the BOP datasets you want to train on from the [BOP benchmark website](
 - [TUD-L](https://bop.felk.cvut.cz/datasets/#TUD-L)
 - [HB](https://bop.felk.cvut.cz/datasets/#HB)
 - [IC-BIN](https://bop.felk.cvut.cz/datasets/#IC-BIN)
+- [ITODD](https://bop.felk.cvut.cz/datasets/#ITODD)
 
 Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_rgb.yml` to match your local layout. Each dataset directory must contain the `models/` folder (3D CAD models are loaded by the criterion at initialization).
 
@@ -234,6 +235,7 @@ model.deploy()
 | TUD-L   | RGB      | `configs/race6d/r50vd/race6d_r50vd_tudl_rgb.yml`  |
 | HB      | RGB      | `configs/race6d/r50vd/race6d_r50vd_hb_rgb.yml`    |
 | IC-BIN  | RGB      | `configs/race6d/r50vd/race6d_r50vd_icbin_rgb.yml` |
+| ITODD   | RGB      | `configs/race6d/r50vd/race6d_r50vd_itodd_rgb.yml` |
 
 ## 🙏 Acknowledgements
 
@@ -249,11 +251,11 @@ RACE6D builds on ideas and code from:
 If you find this work useful, please consider citing:
 
 ```bibtex
-@misc{ha2025race6d,
-  title  = {RACE6D: Real-time Attention-based Category 6D Pose Estimation},
-  author = {Ha, Yoonwoo},
-  year   = {2025},
-  note   = {https://github.com/Yoonwoo-Ha/RACE-6D}
+@inproceedings{ha2026race6d,
+  title     = {RACE-6D: Real-time Accurate Coarse-to-finE object 6D Pose Transformer},
+  author    = {Ha, Yoonwoo and Moon, Hyungpil},
+  booktitle = {CVPR 2026 (Findings)},
+  year      = {2026}
 }
 ```
 

@@ -10,7 +10,7 @@ output_dir: ./output/race6d_r50vd_tless_rgb
 coco_path: ~/Downloads/tless/
 category_file: ./configs/race6d/include/tless2coco_category.yml
 num_classes: 30
-eval_spatial_size: [480, 640] # h w (모델 입력 크기, pos embed/anchors)
+eval_spatial_size: [480, 640] # h w (model input size, pos embed/anchors)
 
 RACE6D:
   backbone: PResNet

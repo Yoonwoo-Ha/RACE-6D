@@ -135,13 +135,13 @@ class RACE6DPostProcessor(nn.Module):
         if self.remap_mscoco_category:
             labels = self._label2cat_lut[labels]
 
-        # Deploy: 최소 출력, dict 생성 없음
+        # Deploy: minimal output, no dict construction
         if self.deploy_mode:
             if has_pose:
                 return labels, boxes_pixel, topk_scores, rot_matrices, translations
             return labels, boxes_pixel, topk_scores
 
-        # vis_enc=False: aux/enc gather 건너뜀, 배치 텐서로 직접 반환
+        # vis_enc=False: skip aux/enc gather, return batch tensors directly
         if not self.vis_enc:
             results = []
             for b in range(labels.shape[0]):
@@ -157,7 +157,7 @@ class RACE6DPostProcessor(nn.Module):
                 results.append(result)
             return results
 
-        # vis_enc=True: aux/enc outputs도 gather
+        # vis_enc=True: also gather aux/enc outputs
         aux_outputs_gathered = []
         enc_outputs_gathered = []
         if 'aux_outputs' in outputs:

@@ -46,7 +46,7 @@ class BaseSolver(object):
 
         self.criterion = to(cfg.criterion, device)
 
-        # Criterion이 decoder의 pose buffer를 참조하도록 연결
+        # Connect criterion to reference the decoder's pose buffer
         model_module = dist_utils.de_parallel(self.model)
         decoder = getattr(model_module, 'decoder', None)
         if decoder is not None and hasattr(self.criterion, 'set_pose_source'):
@@ -91,7 +91,7 @@ class BaseSolver(object):
         self.val_dataloader = dist_utils.warp_loader(self.cfg.val_dataloader, \
             shuffle=self.cfg.val_dataloader.shuffle, seed=seed)
 
-        # iter 기반 scheduler에 iter_per_epoch 주입 (dataloader 생성 후)
+        # Inject iter_per_epoch into iter-based scheduler (after dataloader creation)
         if getattr(self.lr_scheduler, '_iter_based', False):
             self.lr_scheduler.init_schedule(len(self.train_dataloader))
 
@@ -173,7 +173,7 @@ class BaseSolver(object):
         else:
             state = torch.load(path, map_location='cpu', weights_only=False)
 
-        # 옵티마이저와 스케줄러 상태 제거 - 새로운 설정 사용
+        # Remove optimizer and scheduler state — use new configuration
         # if 'optimizer' in state:
         #     del state['optimizer']
         #     print('Optimizer state removed - using new configuration')

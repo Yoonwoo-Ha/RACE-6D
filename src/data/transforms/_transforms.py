@@ -61,27 +61,27 @@ Normalize = register()(T.Normalize)
 
 
 class AugmentationProbabilities:
-    """각 증강 기법별 확률 설정 (GDRNPP 스타일)
+    """Per-augmentation probability settings (GDRNPP style).
 
-    GDRNPP BOP2022 설정 기반:
+    Based on GDRNPP BOP2022 configuration:
     - base_probability = 0.8
-    - 실제 적용 확률 = base_probability * adjustment
+    - effective apply probability = base_probability * adjustment
     """
 
     def __init__(self):
-        # GDRNPP Sometimes() 확률값을 그대로 사용 (base 0.8과 곱해짐)
+        # GDRNPP Sometimes() probability values used as-is (multiplied by base 0.8)
         self.brightness = 0.5  # Sometimes(0.5, EnhanceBrightness)
         self.contrast = 0.3  # Sometimes(0.3, EnhanceContrast)
         self.linear_contrast = 0.5  # Sometimes(0.5, LinearContrast)
         self.color_jitter = 0.3  # Sometimes(0.3, EnhanceColor) - saturation
-        self.hsv_adjust = 0.3  # 추가 HSV 조정
+        self.hsv_adjust = 0.3  # additional HSV adjustment
         self.sharpen = 0.3  # Sometimes(0.3, EnhanceSharpness)
         self.motion_blur = 0.3  # motion blur
         self.gaussian_blur = 0.4  # Sometimes(0.4, GaussianBlur)
         self.gaussian_noise = 0.1  # Sometimes(0.1, AdditiveGaussianNoise)
-        self.additional_noise = 0.1  # 추가 노이즈
+        self.additional_noise = 0.1  # additional noise
         self.grayscale = 0.5  # Sometimes(0.5, Grayscale)
-        self.random_background = 0.4  # 별도 고정값 (기본 확률 무시)
+        self.random_background = 0.4  # separate fixed value (ignores base probability)
         self.coarse_dropout = 0.5  # Sometimes(0.5, CoarseDropout)
         self.rotate_expand = 0.3  # rotate expand
         self.object_occlusion = 0.3  # object occlusion
@@ -93,28 +93,28 @@ class AugmentationManager:
     def __init__(self, base_probability: float = 0.8):
         """
         Args:
-            base_probability: 기본 적용 확률 (기본값: 0.8)
+            base_probability: base apply probability (default: 0.8)
         """
         self.base_probability = max(0.1, min(1.0, base_probability))
         self.probs = AugmentationProbabilities()
 
     def get_probability(self, transform_name: str) -> float:
-        """변환 기법별 실제 적용 확률 계산"""
+        """Compute the effective apply probability for a given transform."""
         import os
         if os.environ.get("AUG_FORCE_P_ONE", "0") == "1":
             return 1.0
         if hasattr(self.probs, transform_name):
             adjustment = getattr(self.probs, transform_name)
 
-            # 배경 교체는 별도 고정값 사용
+            # Background replacement uses its own fixed value
             if transform_name == "random_background":
                 return adjustment
 
-            # 나머지는 기본 확률에 조절값 적용
+            # All others: apply adjustment to base probability
             final_prob = self.base_probability * adjustment
             return max(0.0, min(1.0, final_prob))
 
-        # 정의되지 않은 변환은 기본 확률 사용
+        # Undefined transforms fall back to base probability
         return self.base_probability
 
 
@@ -177,68 +177,6 @@ class EmptyTransform(T.Transform):
 
 
 @register()
-class PadToSize(T.Pad):
-    _transformed_types = (
-        PILImage.Image,
-        Image,
-        Video,
-        Mask,
-        BoundingBoxes,
-    )
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        sp = F.get_size(flat_inputs[0])
-        h, w = self.size[1] - sp[0], self.size[0] - sp[1]
-        self.padding = [0, 0, w, h]
-        return dict(padding=self.padding)
-
-    def __init__(self, size, fill=0, padding_mode="constant") -> None:
-        if isinstance(size, int):
-            size = (size, size)
-        self.size = size
-        super().__init__(0, fill, padding_mode)
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        fill = self._fill[type(inpt)]
-        padding = params["padding"]
-        return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
-
-    def __call__(self, *inputs: Any) -> Any:
-        outputs = super().forward(*inputs)
-        if len(outputs) > 1 and isinstance(outputs[1], dict):
-            outputs[1]["padding"] = torch.tensor(self.padding)
-        return outputs
-
-
-@register()
-class RandomIoUCrop(T.RandomIoUCrop):
-    def __init__(
-        self,
-        min_scale: float = 0.3,
-        max_scale: float = 1,
-        min_aspect_ratio: float = 0.5,
-        max_aspect_ratio: float = 2,
-        sampler_options: Optional[List[float]] = None,
-        trials: int = 40,
-        p: float = 1.0,
-    ):
-        super().__init__(
-            min_scale,
-            max_scale,
-            min_aspect_ratio,
-            max_aspect_ratio,
-            sampler_options,
-            trials,
-        )
-        self.p = p
-
-    def __call__(self, *inputs: Any) -> Any:
-        if torch.rand(1) >= self.p:
-            return inputs if len(inputs) > 1 else inputs[0]
-        return super().forward(*inputs)
-
-
-@register()
 class ConvertBoxes(T.Transform):
     _transformed_types = (BoundingBoxes,)
 
@@ -265,15 +203,15 @@ class ConvertBoxes(T.Transform):
 @register()
 class ConvertPose(nn.Module):
     """
-    Pose를 정규화된 좌표로 변환 (target['cam_K']에서 cam_K 가져옴)
-    bbox 기반 상대 좌표 방식 사용
+    Convert pose to normalized coordinates (cam_K fetched from target['cam_K']).
+    Uses bbox-relative coordinate encoding.
     """
 
     def __init__(self, normalize=False, coco_path=None) -> None:
         super().__init__()
         self.normalize = normalize
-        # coco_path는 기존 config 호환성을 위해 받지만 사용하지 않음
-        # cam_K는 target['cam_K']에서 가져옴
+        # coco_path is accepted for config backward compatibility but is not used.
+        # cam_K is read from target['cam_K'].
 
     def forward(self, *inputs):
         if len(inputs) == 1:
@@ -284,13 +222,13 @@ class ConvertPose(nn.Module):
         else:
             target, image, dataset_info = inputs, None, None
 
-        # boxes 정보 확인
+        # Check bounding box information
         if "boxes" not in target:
             raise ValueError(
                 "Bounding box information is required for ConvertPose transform"
             )
 
-        # poses 정보 확인
+        # Check pose information
         if "poses" not in target:
             raise ValueError("Pose information is required for ConvertPose transform")
 
@@ -310,10 +248,10 @@ class ConvertPose(nn.Module):
         )
         cam_K = target["cam_K"][0]  # [fx, 0, cx, 0, fy, cy, 0, 0, 1]
 
-        # 좌표 변환 (정규화)
+        # Coordinate conversion (normalization)
         converted_poses = self._convert_poses(poses, boxes, cam_K)
 
-        # 새로운 타겟 생성
+        # Build new target
         new_target = target.copy()
         new_target["poses"] = Pose(converted_poses)
 
@@ -326,7 +264,7 @@ class ConvertPose(nn.Module):
         )
 
     def _convert_poses(self, poses, bbox_data, cam_K):
-        """bbox 기반 상대 좌표 변환"""
+        """Convert poses to bbox-relative coordinates."""
         if isinstance(poses, torch.Tensor):
             device = poses.device
             # cam_K: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
@@ -337,19 +275,19 @@ class ConvertPose(nn.Module):
 
             poses = poses.reshape(-1, 12)
 
-            # bbox 데이터를 올바르게 처리
+            # Handle bbox data correctly
             if isinstance(bbox_data, torch.Tensor):
                 bbox_tensor = bbox_data.to(device).reshape(-1, 4)
             else:
                 bbox_tensor = torch.tensor(bbox_data, device=device).reshape(-1, 4)
 
             # Extract translation components
-            tx = poses[:, 0]  # mm 단위
-            ty = poses[:, 1]  # mm 단위
-            tz = poses[:, 2]  # mm 단위
+            tx = poses[:, 0]  # in mm
+            ty = poses[:, 1]  # in mm
+            tz = poses[:, 2]  # in mm
 
             # Calculate bounding box size
-            # bbox format: [x1, y1, x2, y2] (정규화 안된 좌표값)
+            # bbox format: [x1, y1, x2, y2] (unnormalized pixel coordinates)
             x1 = bbox_tensor[:, 0]
             y1 = bbox_tensor[:, 1]
             x2 = bbox_tensor[:, 2]
@@ -360,9 +298,9 @@ class ConvertPose(nn.Module):
             cybbox = (y1 + y2) / 2
 
             # Calculate relative translation coordinates
-            rx = (px + (fx * tx / tz) - cxbbox) / wbbox  # 정규화된 좌표값
-            ry = (py + (fy * ty / tz) - cybbox) / hbbox  # 정규화된 좌표값
-            rz = tz / 1000  # 정규화된 깊이 m단위
+            rx = (px + (fx * tx / tz) - cxbbox) / wbbox  # normalized coordinate
+            ry = (py + (fy * ty / tz) - cybbox) / hbbox  # normalized coordinate
+            rz = tz / 1000  # normalized depth in meters
 
             # Rotation (9D flattened 3x3)
             new_rot = poses[:, 3:12]
@@ -379,7 +317,7 @@ class ConvertPose(nn.Module):
 
             poses = poses.reshape(-1, 12)
 
-            # bbox 데이터를 올바르게 처리
+            # Handle bbox data correctly
             if isinstance(bbox_data, np.ndarray):
                 bbox_array = bbox_data.reshape(-1, 4)
             elif isinstance(bbox_data, torch.Tensor):
@@ -388,12 +326,12 @@ class ConvertPose(nn.Module):
                 bbox_array = np.array(bbox_data).reshape(-1, 4)
 
             # Extract translation components
-            tx = poses[:, 0]  # mm 단위
-            ty = poses[:, 1]  # mm 단위
-            tz = poses[:, 2]  # mm 단위
+            tx = poses[:, 0]  # in mm
+            ty = poses[:, 1]  # in mm
+            tz = poses[:, 2]  # in mm
 
             # Calculate bounding box size
-            # bbox format: [x1, y1, x2, y2] (정규화 안된 좌표값)
+            # bbox format: [x1, y1, x2, y2] (unnormalized pixel coordinates)
             x1 = bbox_array[:, 0]
             y1 = bbox_array[:, 1]
             x2 = bbox_array[:, 2]
@@ -406,110 +344,12 @@ class ConvertPose(nn.Module):
             # Calculate relative translation coordinates
             rx = (px + (fx * tx / tz) - cxbbox) / wbbox
             ry = (py + (fy * ty / tz) - cybbox) / hbbox
-            rz = tz / 1000  # 정규화된 깊이 m단위
+            rz = tz / 1000  # normalized depth in meters
 
             # Rotation (9D flattened 3x3)
             new_rot = poses[:, 3:12]
 
             new_tran = np.stack([rx, ry, rz], axis=1)
-            new_poses = np.concatenate([new_tran, new_rot], axis=1)
-
-        else:
-            raise TypeError("Unsupported type for pose transformation")
-
-        return new_poses
-
-
-@register()
-class NormalizePose(nn.Module):
-    def __init__(self, normalize=False) -> None:
-        super().__init__()
-        self.normalize = normalize
-
-    def forward(self, *inputs):
-        # 입력 구조 파싱
-        if len(inputs) == 1:
-            inputs = inputs[0]
-
-        # 튜플 형태의 입력에서 데이터 추출
-        if isinstance(inputs, tuple):
-            image = inputs[0]
-            target = inputs[1]
-            dataset_info = inputs[2] if len(inputs) > 2 else None
-        else:
-            # 단일 타겟인 경우
-            target = inputs
-            image = None
-            dataset_info = None
-
-        # poses가 없으면 그대로 반환
-        if not isinstance(target, dict) or "poses" not in target:
-            return inputs
-
-        # pose 데이터 추출
-        poses = target["poses"]
-        if isinstance(poses, Pose):
-            poses = poses.data
-
-        # pose 변환 수행
-        converted_poses = self._normalize_poses(poses)
-
-        # 새로운 target 생성
-        new_target = target.copy()
-        new_target["poses"] = Pose(converted_poses)
-
-        # 결과 반환
-        if image is not None:
-            if dataset_info is not None:
-                return (image, new_target, dataset_info)
-            else:
-                return (image, new_target)
-        else:
-            return new_target
-
-    def _normalize_poses(self, poses):
-        """실제 pose 변환 로직"""
-        if isinstance(poses, torch.Tensor):
-            poses = poses.reshape(-1, 12)
-
-            # Extract translation components
-            tx = poses[:, 0]  # mm 단위
-            ty = poses[:, 1]  # mm 단위
-            tz = poses[:, 2]  # mm 단위
-
-            tx_m = tx / 1000
-            ty_m = ty / 1000
-            tz_m = tz / 1000
-
-            # Process rotation (unchanged - still r6d)
-            R = poses[:, 3:12].reshape(-1, 3, 3)
-            r1 = R[:, :, 0]  # column 1
-            r2 = R[:, :, 1]  # column 2
-            new_rot = torch.cat([r1, r2], dim=1)
-
-            new_tran = torch.stack([tx_m, ty_m, tz_m], dim=1)
-            new_poses = torch.cat([new_tran, new_rot], dim=1)
-
-        elif isinstance(poses, np.ndarray):
-            poses = poses.reshape(-1, 12)
-
-            # Extract translation components
-            tx = poses[:, 0]  # mm 단위
-            ty = poses[:, 1]  # mm 단위
-            tz = poses[:, 2]  # mm 단위
-
-            tx_m = tx / 1000
-            ty_m = ty / 1000
-            tz_m = tz / 1000
-
-            # Calculate relative translation coordinates
-            # Process rotation (unchanged - still r6d)
-            R = poses[:, 3:12].reshape(-1, 3, 3)
-            r1 = R[:, :, 0]  # column 1
-            r2 = R[:, :, 1]  # column 2
-            new_rot = np.concatenate([r1, r2], axis=1)
-
-            new_tran = np.stack([tx_m, ty_m, tz_m], axis=1)
             new_poses = np.concatenate([new_tran, new_rot], axis=1)
 
         else:
@@ -539,15 +379,15 @@ class ConvertPILImage(T.Transform):
 
 @register()
 class ColorJitter(T.ColorJitter):
-    """GDRNPP 스타일 Color/Saturation 조정 (EnhanceColor 대응)
+    """GDRNPP-style color/saturation adjustment (maps to EnhanceColor).
 
     GDRNPP: Sometimes(0.3, pillike.EnhanceColor(factor=(0., 20.)))
-    factor 0 = 흑백, 1 = 원본, >1 = 채도 증가
+    factor 0 = grayscale, 1 = original, >1 = increased saturation
     """
 
     def __init__(self, saturation=(0.5, 3.0), hue=0):
         # GDRNPP: pillike.EnhanceColor(factor=(0., 20.))
-        # factor 0 = 흑백, 1 = 원본, >1 = 채도 증가 (hue=0: GDRNPP에는 hue 조정 없음)
+        # factor 0 = grayscale, 1 = original, >1 = increased saturation (hue=0: no hue adjustment in GDRNPP)
         super().__init__(brightness=0, contrast=0, saturation=saturation, hue=hue)
         self.aug_manager = AugmentationManager()
         self.p = self.aug_manager.get_probability("color_jitter")
@@ -556,175 +396,6 @@ class ColorJitter(T.ColorJitter):
         if torch.rand(1) >= self.p:
             return inputs if len(inputs) > 1 else inputs[0]
         return super().forward(*inputs)
-
-
-@register()
-class RandomBrightness(T.Transform):
-    """GDRNPP 스타일 Brightness 조정
-
-    GDRNPP: Sometimes(0.5, pillike.EnhanceBrightness(factor=(0.1, 6.)))
-    factor 0 = 검정, 1 = 원본, >1 = 밝게
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(self, factor_range: Tuple[float, float] = (0.4, 2.5)) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("brightness")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        factor = float(
-            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-        )
-        return {"apply": True, "factor": factor}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            from PIL import ImageEnhance
-
-            enhancer = ImageEnhance.Brightness(inpt)
-            return enhancer.enhance(params["factor"])
-        return inpt
-
-
-@register()
-class RandomContrast(T.Transform):
-    """GDRNPP 스타일 Contrast 조정
-
-    GDRNPP: Sometimes(0.3, pillike.EnhanceContrast(factor=(0.2, 50.)))
-    factor 0 = 회색, 1 = 원본, >1 = 대비 증가
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(self, factor_range: Tuple[float, float] = (0.5, 3.0)) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("contrast")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        factor = float(
-            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-        )
-        return {"apply": True, "factor": factor}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            from PIL import ImageEnhance
-
-            enhancer = ImageEnhance.Contrast(inpt)
-            return enhancer.enhance(params["factor"])
-        return inpt
-
-
-@register()
-class RandomLinearContrast(T.Transform):
-    """GDRNPP 스타일 Linear Contrast 조정
-
-    GDRNPP: Sometimes(0.5, iaa.contrast.LinearContrast((0.5, 2.2), per_channel=0.3))
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(
-        self,
-        factor_range: Tuple[float, float] = (0.5, 2.2),
-        per_channel_prob: float = 0.3,
-    ) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.per_channel_prob = per_channel_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("linear_contrast")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        per_channel = torch.rand(1) < self.per_channel_prob
-        if per_channel:
-            factors = [
-                float(
-                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-                )
-                for _ in range(3)
-            ]
-        else:
-            f = float(
-                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-            )
-            factors = [f, f, f]
-        return {"apply": True, "factors": factors, "per_channel": per_channel}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            mean = 128.0
-            for c in range(3):
-                img_array[:, :, c] = (img_array[:, :, c] - mean) * params["factors"][
-                    c
-                ] + mean
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            return PILImage.fromarray(img_array)
-        return inpt
-
-
-@register()
-class RandomGrayscale(T.Transform):
-    """GDRNPP 스타일 Grayscale 변환
-
-    GDRNPP: Sometimes(0.5, Grayscale(alpha=(0.0, 1.0)))
-    alpha 0 = 원본, 1 = 완전 흑백, 중간값 = 블렌딩
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(self, alpha_range: Tuple[float, float] = (0.0, 1.0), p: float = None) -> None:
-        super().__init__()
-        self.alpha_range = alpha_range
-        self.aug_manager = AugmentationManager()
-        self.p = p if p is not None else self.aug_manager.get_probability("grayscale")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        alpha = float(torch.empty(1).uniform_(self.alpha_range[0], self.alpha_range[1]))
-        return {"apply": True, "alpha": alpha}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            alpha = params["alpha"]
-            arr = np.array(inpt)
-            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-            if alpha >= 1.0:
-                gray_3ch = cv2.merge([gray, gray, gray])
-                return PILImage.fromarray(gray_3ch)
-            gray_3ch = cv2.merge([gray, gray, gray])
-            blended = cv2.addWeighted(arr, 1.0 - alpha, gray_3ch, alpha, 0)
-            return PILImage.fromarray(blended)
-        return inpt
 
 
 @register()
@@ -748,10 +419,10 @@ class RandomHSVAdjust(T.ColorJitter):
 
 @register()
 class RandomSharpen(T.Transform):
-    """GDRNPP 스타일 Sharpness 조정
+    """GDRNPP-style sharpness adjustment.
 
     GDRNPP: Sometimes(0.3, pillike.EnhanceSharpness(factor=(0., 50.)))
-    factor 0 = 흐릿, 1 = 원본, >1 = 선명
+    factor 0 = blurry, 1 = original, >1 = sharp
     """
 
     _transformed_types = (PILImage.Image, Image)
@@ -785,7 +456,7 @@ class RandomSharpen(T.Transform):
 
 @register()
 class RandomGaussianBlur(nn.Module):
-    """GDRNPP 스타일 Gaussian Blur
+    """GDRNPP-style Gaussian blur.
 
     GDRNPP: Sometimes(0.4, GaussianBlur((0., 3.)))
     """
@@ -828,144 +499,8 @@ class RandomGaussianBlur(nn.Module):
 
 
 @register()
-class RandomAdd(T.Transform):
-    """GDRNPP 스타일 Add (밝기 shift)
-
-    GDRNPP: Sometimes(0.5, Add((-25, 25), per_channel=0.3))
-    모든 픽셀에 동일한 값을 더함
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(
-        self, value_range: Tuple[int, int] = (-25, 25), per_channel_prob: float = 0.3
-    ) -> None:
-        super().__init__()
-        self.value_range = value_range
-        self.per_channel_prob = per_channel_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("add_value")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        per_channel = torch.rand(1) < self.per_channel_prob
-        if per_channel:
-            values = [
-                int(
-                    torch.randint(
-                        self.value_range[0], self.value_range[1] + 1, (1,)
-                    ).item()
-                )
-                for _ in range(3)
-            ]
-        else:
-            v = int(
-                torch.randint(self.value_range[0], self.value_range[1] + 1, (1,)).item()
-            )
-            values = [v, v, v]
-        return {"apply": True, "values": values}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            for c in range(3):
-                img_array[:, :, c] += params["values"][c]
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            return PILImage.fromarray(img_array)
-        return inpt
-
-
-@register()
-class RandomMultiply(T.Transform):
-    """GDRNPP 스타일 Multiply (대비/밝기 스케일링)
-
-    GDRNPP: Sometimes(0.5, Multiply((0.6, 1.4), per_channel=0.5))
-    모든 픽셀에 동일한 값을 곱함
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(
-        self,
-        factor_range: Tuple[float, float] = (0.6, 1.4),
-        per_channel_prob: float = 0.5,
-    ) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.per_channel_prob = per_channel_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("multiply")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        per_channel = torch.rand(1) < self.per_channel_prob
-        if per_channel:
-            factors = [
-                float(
-                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-                )
-                for _ in range(3)
-            ]
-        else:
-            f = float(
-                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-            )
-            factors = [f, f, f]
-        return {"apply": True, "factors": factors}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            for c in range(3):
-                img_array[:, :, c] *= params["factors"][c]
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            return PILImage.fromarray(img_array)
-        return inpt
-
-
-
-class _LegacyRandomGaussianBlur(nn.Module):
-    """이전 버전과의 호환성을 위한 레거시 클래스"""
-
-    def __init__(
-        self,
-        kernel_sizes: List[int] = [3, 5],
-        sigma_range: Tuple[float, float] = (0.1, 2.0),
-        strong_blur_prob: float = 0.2,
-    ) -> None:
-        super().__init__()
-        self.kernel_sizes = kernel_sizes
-        self.sigma_range = sigma_range
-        self.strong_blur_prob = strong_blur_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("gaussian_blur")
-
-    def forward(self, *inputs):
-        if torch.rand(1) >= self.p:
-            return inputs if len(inputs) > 1 else inputs[0]
-        if torch.rand(1) < self.strong_blur_prob and len(self.kernel_sizes) > 1:
-            kernel_size = self.kernel_sizes[-1]
-        else:
-            kernel_size = self.kernel_sizes[0]
-        blur = T.GaussianBlur(
-            kernel_size=(kernel_size, kernel_size), sigma=self.sigma_range
-        )
-        return blur(*inputs)
-
-
-@register()
 class RandomCoarseDropout(T.Transform):
-    """imgaug의 CoarseDropout과 동일한 방식으로 구현 - 낮은 해상도에서 마스크 생성 후 업샘플링"""
+    """Implements CoarseDropout identical to imgaug - generates a mask at low resolution then upsamples."""
 
     _transformed_types = (
         PILImage.Image,
@@ -983,13 +518,13 @@ class RandomCoarseDropout(T.Transform):
     ) -> None:
         super().__init__()
 
-        # drop_prob: 픽셀별 드롭아웃 확률
+        # drop_prob: per-pixel dropout probability
         if isinstance(drop_prob, (int, float)):
             self.p_range = (drop_prob, drop_prob)
         else:
             self.p_range = drop_prob
 
-        # size_percent 처리 (낮은 해상도 크기)
+        # size_percent: controls low-resolution mask size
         if isinstance(size_percent, (int, float)):
             self.size_percent_range = (size_percent, size_percent)
         else:
@@ -1006,27 +541,27 @@ class RandomCoarseDropout(T.Transform):
         if torch.rand(1) >= self.p_apply:
             return {"apply_transform": False}
 
-        # 이미지 크기 가져오기
+        # Get image dimensions
         img = flat_inputs[0]
         if isinstance(img, PILImage.Image):
             img_width, img_height = img.size
-            channels = 3  # RGB 가정
+            channels = 3  # assume RGB
         elif isinstance(img, Image):
             channels, img_height, img_width = img.shape
         else:
             raise ValueError(f"Unsupported image type: {type(img)}")
 
-        # 드롭아웃 확률 샘플링
+        # Sample dropout probability
         p_dropout = float(torch.empty(1).uniform_(self.p_range[0], self.p_range[1]))
 
-        # 낮은 해상도 크기 샘플링 (imgaug의 핵심!)
+        # Sample low-resolution size (key to the imgaug approach)
         size_percent = float(
             torch.empty(1).uniform_(
                 self.size_percent_range[0], self.size_percent_range[1]
             )
         )
 
-        # 낮은 해상도 크기 계산
+        # Compute low-resolution dimensions
         low_height = max(self.min_size, int(img_height * size_percent))
         low_width = max(self.min_size, int(img_width * size_percent))
 
@@ -1043,7 +578,7 @@ class RandomCoarseDropout(T.Transform):
     def _apply_coarse_dropout(
         self, img: np.ndarray, params: Dict[str, Any]
     ) -> np.ndarray:
-        """imgaug 스타일의 CoarseDropout 적용 - FromLowerResolution 방식"""
+        """Apply CoarseDropout in imgaug style - FromLowerResolution approach."""
         if isinstance(img, Image):
             img = F.to_pil_image(img)
         if isinstance(img, PILImage.Image):
@@ -1087,7 +622,7 @@ class RandomCoarseDropout(T.Transform):
                 mask = mask[:, :, np.newaxis]
             img_result *= mask
 
-        # 결과를 uint8로 변환
+        # Convert result to uint8
         img_result = np.clip(img_result, 0, 255).astype(np.uint8)
         return PILImage.fromarray(img_result)
 
@@ -1104,8 +639,8 @@ class RandomCoarseDropout(T.Transform):
 class RandomISPSimulation(T.Transform):
     """Camera ISP pipeline simulation: Debayering artifacts + Unsharp masking + CLAHE.
 
-    PBR 렌더링에는 없는 실제 카메라 ISP 처리를 시뮬레이션하여 sim-to-real gap 축소.
-    SurfEmb (CVPR 2022) 구현 기반.
+    Simulates real camera ISP processing absent from PBR rendering to reduce the sim-to-real gap.
+    Based on the SurfEmb (CVPR 2022) implementation.
     """
 
     _transformed_types = (
@@ -1191,652 +726,6 @@ class RandomISPSimulation(T.Transform):
             img = self._apply_clahe(img)
 
         return PILImage.fromarray(img)
-
-
-@register()
-class PerClassColorDiversification(nn.Module):
-    """Per-class HSV color diversification on visib_mask regions.
-
-    PBR 텍스처의 색감 오버피팅을 방지하기 위해 클래스별로 독립적인
-    HSV 변환을 적용. 텍스처 구조(edge, gradient)는 보존하고 색상만 변경.
-    """
-
-    def __init__(
-        self,
-        hue_range: float = 30.0,
-        saturation_range: Tuple[float, float] = (0.7, 1.4),
-        value_range: Tuple[float, float] = (0.8, 1.2),
-        p: float = None,
-    ) -> None:
-        super().__init__()
-        self.hue_range = hue_range
-        self.saturation_range = saturation_range
-        self.value_range = value_range
-        self.aug_manager = AugmentationManager()
-        self.p = p if p is not None else 0.5
-
-    def _random_hsv_params(self) -> Tuple[float, float, float]:
-        hue_shift = float(torch.empty(1).uniform_(-self.hue_range, self.hue_range))
-        sat_scale = float(torch.empty(1).uniform_(*self.saturation_range))
-        val_scale = float(torch.empty(1).uniform_(*self.value_range))
-        return hue_shift, sat_scale, val_scale
-
-    def _apply_hsv_shift(
-        self, img_hsv: np.ndarray, mask: np.ndarray,
-        hue_shift: float, sat_scale: float, val_scale: float,
-    ) -> np.ndarray:
-        mask_bool = mask > 0.5
-        if not mask_bool.any():
-            return img_hsv
-
-        h, s, v = img_hsv[:, :, 0], img_hsv[:, :, 1], img_hsv[:, :, 2]
-        h[mask_bool] = (h[mask_bool].astype(np.float32) + hue_shift) % 180
-        s[mask_bool] = np.clip(s[mask_bool].astype(np.float32) * sat_scale, 0, 255)
-        v[mask_bool] = np.clip(v[mask_bool].astype(np.float32) * val_scale, 0, 255)
-        img_hsv[:, :, 0] = h.astype(np.uint8)
-        img_hsv[:, :, 1] = s.astype(np.uint8)
-        img_hsv[:, :, 2] = v.astype(np.uint8)
-        return img_hsv
-
-    def forward(self, *inputs):
-        if len(inputs) == 1:
-            inputs = inputs[0]
-
-        image, target = inputs[0], inputs[1]
-
-        if torch.rand(1) >= self.p:
-            return inputs
-
-        if "masks" not in target or "labels" not in target:
-            return inputs
-
-        masks = target["masks"]
-        if hasattr(masks, "data"):
-            masks = masks.data
-        labels = target["labels"]
-
-        if len(masks) == 0:
-            return inputs
-
-        if isinstance(image, Image):
-            image = F.to_pil_image(image)
-        img_np = np.array(image)
-        img_hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
-
-        unique_labels = torch.unique(labels)
-        class_hsv_params = {int(lbl): self._random_hsv_params() for lbl in unique_labels}
-
-        for i in range(len(masks)):
-            lbl = int(labels[i])
-            mask_np = masks[i].numpy() if isinstance(masks[i], torch.Tensor) else masks[i]
-            if len(mask_np.shape) == 3:
-                mask_np = mask_np.max(axis=0)
-            hue_shift, sat_scale, val_scale = class_hsv_params[lbl]
-            img_hsv = self._apply_hsv_shift(img_hsv, mask_np, hue_shift, sat_scale, val_scale)
-
-        img_result = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2RGB)
-        result_image = PILImage.fromarray(img_result)
-
-        out = list(inputs)
-        out[0] = result_image
-        return tuple(out)
-
-
-@register()
-class MaskRegionDegradation(nn.Module):
-    """visib_mask 영역에만 blur + noise를 적용하여 PBR 렌더링의 과도한 선명함을 완화."""
-
-    def __init__(
-        self,
-        blur_kernel: int = 7,
-        blur_sigma_range: Tuple[float, float] = (2.0, 3.0),
-        noise_scale_range: Tuple[float, float] = (5.0, 10.0),
-        p: float = 0.9,
-    ) -> None:
-        super().__init__()
-        self.blur_kernel = blur_kernel
-        self.blur_sigma_range = blur_sigma_range
-        self.noise_scale_range = noise_scale_range
-        self.p = p
-
-    def forward(self, *inputs):
-        if len(inputs) == 1:
-            inputs = inputs[0]
-
-        image, target = inputs[0], inputs[1]
-
-        if torch.rand(1) >= self.p:
-            return inputs
-
-        if "masks" not in target:
-            return inputs
-
-        masks = target["masks"]
-        if hasattr(masks, "data"):
-            masks = masks.data
-        if len(masks) == 0:
-            return inputs
-
-        if isinstance(image, Image):
-            image = F.to_pil_image(image)
-        img_np = np.array(image, dtype=np.float32)
-
-        # union of all visib masks
-        masks_np = masks.numpy() if isinstance(masks, torch.Tensor) else np.asarray(masks)
-        union_mask = (masks_np.max(axis=0) > 0.5).astype(np.float32)
-
-        # blur
-        sigma = float(torch.empty(1).uniform_(*self.blur_sigma_range))
-        blurred = cv2.GaussianBlur(img_np, (self.blur_kernel, self.blur_kernel), sigma)
-
-        # noise
-        noise_scale = float(torch.empty(1).uniform_(*self.noise_scale_range))
-        noise = np.random.normal(0, noise_scale, img_np.shape).astype(np.float32)
-
-        # apply only on mask region
-        union_3ch = union_mask[:, :, None]
-        degraded = blurred + noise
-        result = img_np * (1.0 - union_3ch) + degraded * union_3ch
-        result = np.clip(result, 0, 255).astype(np.uint8)
-
-        out = list(inputs)
-        out[0] = PILImage.fromarray(result)
-        return tuple(out)
-
-
-@register()
-class GlobalDegradation(nn.Module):
-    """전체 이미지에 blur + noise를 한번에 적용. cv2 기반."""
-
-    def __init__(
-        self,
-        blur_kernel: int = 7,
-        blur_sigma_range: Tuple[float, float] = (2.0, 3.0),
-        noise_scale_range: Tuple[float, float] = (5.0, 10.0),
-        p: float = 0.9,
-    ) -> None:
-        super().__init__()
-        self.blur_kernel = blur_kernel
-        self.blur_sigma_range = blur_sigma_range
-        self.noise_scale_range = noise_scale_range
-        self.p = p
-
-    def forward(self, *inputs):
-        if len(inputs) == 1:
-            inputs = inputs[0]
-
-        image = inputs[0]
-
-        if torch.rand(1) >= self.p:
-            return inputs
-
-        if isinstance(image, Image):
-            image = F.to_pil_image(image)
-        img_np = np.array(image, dtype=np.float32)
-
-        sigma = float(torch.empty(1).uniform_(*self.blur_sigma_range))
-        blurred = cv2.GaussianBlur(img_np, (self.blur_kernel, self.blur_kernel), sigma)
-
-        noise_scale = float(torch.empty(1).uniform_(*self.noise_scale_range))
-        noise = np.random.normal(0, noise_scale, img_np.shape).astype(np.float32)
-
-        result = np.clip(blurred + noise, 0, 255).astype(np.uint8)
-
-        out = list(inputs)
-        out[0] = PILImage.fromarray(result)
-        return tuple(out)
-
-
-@register()
-class RandomObjectOcclusion(T.Transform):
-    """객체 중심적 occlusion augmentation - bbox 영역에 1-3개의 랜덤 색상 블록으로 가림"""
-
-    _transformed_types = (
-        PILImage.Image,
-        Image,
-    )
-
-    def __init__(
-        self,
-        occlusion_ratio_range: Tuple[float, float] = (0.05, 0.1),
-        num_blocks_range: Tuple[int, int] = (1, 2),
-        bbox_margin_ratio: float = 0.1,
-        min_bbox_size: int = 20,
-        max_objects_per_image: int = 20,
-        color_mode: str = "random",  # 'random', 'natural'
-        augmentation_strength: float = 0.7,
-    ) -> None:
-        super().__init__()
-
-        self.occlusion_ratio_range = occlusion_ratio_range
-        self.num_blocks_range = num_blocks_range
-        self.bbox_margin_ratio = bbox_margin_ratio
-        self.min_bbox_size = min_bbox_size
-        self.max_objects_per_image = max_objects_per_image
-        self.color_mode = color_mode
-        self.aug_manager = AugmentationManager(augmentation_strength)
-        self.p = self.aug_manager.get_probability("rotate_expand")
-
-    def _generate_random_color(self) -> Tuple[int, int, int]:
-        """랜덤 색상 생성"""
-        if self.color_mode == "random":
-            return tuple(torch.randint(30, 225, (3,)).tolist())
-        elif self.color_mode == "natural":
-            # 자연스러운 색상들
-            colors = [
-                [139, 115, 85],  # 갈색
-                [128, 128, 128],  # 회색
-                [210, 180, 140],  # 베이지
-                [169, 169, 169],  # 밝은 회색
-                [160, 82, 45],  # 안장 갈색
-                [105, 105, 105],  # 어두운 회색
-            ]
-            base_color = colors[torch.randint(0, len(colors), (1,)).item()]
-            # 약간의 변동성 추가
-            variation = torch.randint(-15, 16, (3,))
-            final_color = [
-                max(30, min(225, base_color[i] + variation[i].item())) for i in range(3)
-            ]
-            return tuple(final_color)
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        """변환 파라미터 생성"""
-        # flat_inputs에서 이미지 추출 (첫 번째 요소가 이미지)
-        img = flat_inputs[0]
-
-        if isinstance(img, PILImage.Image):
-            img_w, img_h = img.size
-        elif isinstance(img, Image):
-            _, img_h, img_w = img.shape
-        else:
-            return {"apply_transform": False}
-
-        return {
-            "apply_transform": True,
-            "img_size": (img_w, img_h),
-            "occlusion_blocks": [],  # 실제 블록들은 forward에서 생성
-        }
-
-    def _expand_bbox(
-        self, bbox: torch.Tensor, img_size: Tuple[int, int]
-    ) -> torch.Tensor:
-        """bbox에 margin 추가"""
-        img_w, img_h = img_size
-        x1, y1, x2, y2 = bbox
-
-        w, h = x2 - x1, y2 - y1
-        margin_w = w * self.bbox_margin_ratio
-        margin_h = h * self.bbox_margin_ratio
-
-        new_x1 = max(0, x1 - margin_w)
-        new_y1 = max(0, y1 - margin_h)
-        new_x2 = min(img_w, x2 + margin_w)
-        new_y2 = min(img_h, y2 + margin_h)
-
-        return torch.tensor([new_x1, new_y1, new_x2, new_y2])
-
-    def _create_blocks_for_bbox(
-        self, bbox: torch.Tensor, img_size: Tuple[int, int]
-    ) -> List[Dict]:
-        """하나의 bbox에 대해 occlusion 블록들 생성"""
-        expanded_bbox = self._expand_bbox(bbox, img_size)
-
-        bbox_w = expanded_bbox[2] - expanded_bbox[0]
-        bbox_h = expanded_bbox[3] - expanded_bbox[1]
-        bbox_area = bbox_w * bbox_h
-
-        # 가림 비율과 블록 수 결정
-        occlusion_ratio = (
-            torch.empty(1)
-            .uniform_(self.occlusion_ratio_range[0], self.occlusion_ratio_range[1])
-            .item()
-        )
-
-        num_blocks = torch.randint(
-            self.num_blocks_range[0], self.num_blocks_range[1] + 1, (1,)
-        ).item()
-
-        total_occlusion_area = bbox_area * occlusion_ratio
-        area_per_block = total_occlusion_area / num_blocks
-
-        blocks = []
-        for _ in range(num_blocks):
-            # 블록 크기 결정
-            block_size = int(np.sqrt(area_per_block))
-            aspect_ratio = torch.empty(1).uniform_(0.7, 1.4).item()
-
-            if aspect_ratio >= 1.0:
-                block_w = int(block_size * aspect_ratio)
-                block_h = block_size
-            else:
-                block_w = block_size
-                block_h = int(block_size / aspect_ratio)
-
-            # bbox 영역을 벗어나지 않도록 조정
-            block_w = min(int(block_w), int(bbox_w) - 2)
-            block_h = min(int(block_h), int(bbox_h) - 2)
-            block_w = max(block_w, 10)
-            block_h = max(block_h, 10)
-
-            # 블록 위치 결정
-            max_x = int(bbox_w - block_w)
-            max_y = int(bbox_h - block_h)
-
-            if max_x <= 0 or max_y <= 0:
-                continue
-
-            rel_x = torch.randint(0, max_x, (1,)).item()
-            rel_y = torch.randint(0, max_y, (1,)).item()
-
-            abs_x = int(expanded_bbox[0]) + rel_x
-            abs_y = int(expanded_bbox[1]) + rel_y
-
-            blocks.append(
-                {
-                    "x1": abs_x,
-                    "y1": abs_y,
-                    "x2": abs_x + block_w,
-                    "y2": abs_y + block_h,
-                    "color": self._generate_random_color(),
-                }
-            )
-
-        return blocks
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        """이미지에 occlusion 블록들 적용"""
-        if not params["apply_transform"] or len(params["occlusion_blocks"]) == 0:
-            return inpt
-
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt)
-        else:
-            return inpt
-
-        img_result = img_array.copy()
-
-        # 각 블록 그리기
-        for block in params["occlusion_blocks"]:
-            x1, y1, x2, y2 = block["x1"], block["y1"], block["x2"], block["y2"]
-            color = block["color"]
-
-            # 좌표 범위 확인
-            img_h, img_w = img_result.shape[:2]
-            x1 = max(0, min(x1, img_w - 1))
-            y1 = max(0, min(y1, img_h - 1))
-            x2 = max(x1 + 1, min(x2, img_w))
-            y2 = max(y1 + 1, min(y2, img_h))
-
-            # 블록 그리기
-            if len(img_result.shape) == 3:
-                img_result[y1:y2, x1:x2] = color
-            else:
-                gray_val = int(0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2])
-                img_result[y1:y2, x1:x2] = gray_val
-
-        return PILImage.fromarray(img_result.astype(np.uint8))
-
-    def forward(self, *inputs):
-        """메인 forward 함수"""
-        # 입력 파싱
-        if len(inputs) == 1 and isinstance(inputs[0], tuple):
-            input_tuple = inputs[0]
-            image = input_tuple[0]
-            target = input_tuple[1] if len(input_tuple) > 1 else {}
-        else:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # bbox 정보 확인
-        if not isinstance(target, dict) or "boxes" not in target:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # bbox 데이터 추출
-        boxes = target["boxes"]
-        if hasattr(boxes, "data"):
-            bbox_data = boxes.data
-        else:
-            bbox_data = boxes
-
-        if len(bbox_data) == 0:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # 이미지 크기
-        if isinstance(image, PILImage.Image):
-            img_w, img_h = image.size
-        elif isinstance(image, Image):
-            _, img_h, img_w = image.shape
-        else:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # 각 물체마다 독립적으로 확률 적용
-        selected_bboxes = []
-        for i, bbox in enumerate(bbox_data):
-            # bbox 크기 체크
-            bbox_w = bbox[2] - bbox[0]
-            bbox_h = bbox[3] - bbox[1]
-
-            # 너무 작은 bbox는 스킵
-            if bbox_w < self.min_bbox_size or bbox_h < self.min_bbox_size:
-                continue
-
-            # 각 물체마다 독립적으로 확률 판정
-            if torch.rand(1) < self.p:
-                selected_bboxes.append(bbox)
-
-        # 최대 개수 제한
-        if len(selected_bboxes) > self.max_objects_per_image:
-            indices = torch.randperm(len(selected_bboxes))[: self.max_objects_per_image]
-            selected_bboxes = [selected_bboxes[i] for i in indices]
-
-        if len(selected_bboxes) == 0:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # 선택된 bbox들에 대해 블록 생성
-        all_blocks = []
-        for bbox in selected_bboxes:
-            blocks = self._create_blocks_for_bbox(bbox, (img_w, img_h))
-            all_blocks.extend(blocks)
-
-        if len(all_blocks) == 0:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # 파라미터 업데이트
-        params = self.make_params([image])
-        params["occlusion_blocks"] = all_blocks
-
-        # 이미지 변환
-        transformed_image = self.transform(image, params)
-
-        # 결과 반환
-        if len(inputs) == 1 and isinstance(inputs[0], tuple):
-            input_tuple = inputs[0]
-            return (transformed_image,) + input_tuple[1:]
-        else:
-            return (
-                transformed_image
-                if len(inputs) == 1
-                else (transformed_image,) + inputs[1:]
-            )
-
-
-@register()
-class RandomBackgroundWithPresets(nn.Module):
-    def __init__(
-        self,
-        background_dir: Optional[str] = None,
-        preset_categories: Optional[List[str]] = None,
-        random_color_prob: float = 0.0,  # 단색 배경 비활성화
-        blur_edge: bool = True,
-        random_noise: bool = True,
-        p: float = None,
-    ) -> None:
-        super().__init__()
-        self.background_dir = (
-            os.path.expanduser(background_dir) if background_dir else None
-        )
-        self.random_color_prob = random_color_prob
-        self.blur_edge = blur_edge
-        self.random_noise = random_noise
-        self.aug_manager = AugmentationManager()
-        if p is not None:
-            self.p = p
-        else:
-            self.p = self.aug_manager.get_probability("random_background")
-
-        # 프리셋 카테고리 설정
-        self.preset_categories = preset_categories or ["STUDIO", "NATURAL", "INDOOR"]
-        self.bg_colors = BackgroundColors()
-        self.available_colors = self._gather_colors()
-
-        # 배경 이미지 로드
-        if background_dir:
-            self.background_images = self._load_background_images()
-        else:
-            self.background_images = None
-
-        self._cached_image = None
-        self._cached_params = None
-
-    def _gather_colors(self) -> Dict[str, List[int]]:
-        """선택된 카테고리의 모든 색상 수집"""
-        colors = {}
-        for category in self.preset_categories:
-            if hasattr(self.bg_colors, category):
-                colors.update(getattr(self.bg_colors, category))
-        return colors
-
-    def _load_background_images(self) -> List[str]:
-        """배경 이미지 디렉토리에서 이미지 파일 리스트 로드"""
-        valid_extensions = [".jpg", ".jpeg", ".png"]
-        background_files = []
-
-        if os.path.exists(self.background_dir):
-            for file in os.listdir(self.background_dir):
-                if any(file.lower().endswith(ext) for ext in valid_extensions):
-                    background_files.append(os.path.join(self.background_dir, file))
-
-        return background_files
-
-    def make_params(self, image) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply_transform": False}
-
-        # 이미지 크기 계산
-        if isinstance(image, PILImage.Image):
-            w, h = image.size
-            shape = (h, w, 3)
-        elif isinstance(image, Image):
-            c, h, w = image.shape
-            shape = (h, w, 3)
-
-        # 배경 생성 방식 결정
-        use_color = (
-            torch.rand(1) < self.random_color_prob
-        ) or not self.background_images
-
-        params = {
-            "apply_transform": True,
-            "shape": shape,
-            "use_color": use_color,
-        }
-
-        if use_color:
-            # 색상 선택 및 변동성 추가
-            color_name = torch.randint(0, len(self.available_colors), (1,)).item()
-            color_value = list(self.available_colors.values())[color_name]
-
-            # 순수 흰색/검정이 아닌 경우 변동성 추가
-            if color_value not in ([255, 255, 255], [0, 0, 0]):
-                variation = torch.randint(-10, 11, (3,))
-                color_value = np.clip(np.array(color_value) + variation.numpy(), 0, 255)
-
-            params["color_value"] = color_value
-        else:
-            # 배경 이미지 선택
-            bg_idx = torch.randint(0, len(self.background_images), (1,)).item()
-            params["background_path"] = self.background_images[bg_idx]
-
-        return params
-
-    def _prepare_mask(self, mask: torch.Tensor) -> torch.Tensor:
-        """마스크 전처리 및 경계선 블러 처리"""
-        if len(mask.shape) == 3:
-            mask = mask.max(dim=0)[0]
-
-        mask = (mask > 0.5).float()
-
-        if self.blur_edge:
-            # numpy로 변환하여 가우시안 블러 적용
-            mask_np = mask.numpy()
-            mask_np = cv2.GaussianBlur(mask_np, (7, 7), 1.5)
-            mask = torch.from_numpy(np.clip(mask_np, 0, 1))
-
-        return mask.unsqueeze(0).repeat(3, 1, 1)
-
-    def _add_noise(self, image: torch.Tensor) -> torch.Tensor:
-        """이미지에 노이즈 추가"""
-        noise = torch.randn_like(image) * 10
-        noisy_img = image + noise
-        return torch.clamp(noisy_img, 0, 255)
-
-    def _transform_single(self, image, mask, params: Dict[str, Any]) -> torch.Tensor:
-        if not params["apply_transform"]:
-            return image
-
-        # 이미지를 텐서로 변환
-        if isinstance(image, PILImage.Image):
-            image_tensor = F.pil_to_tensor(image).float()
-        else:
-            image_tensor = image.float()
-
-        # 마스크 준비
-        mask_tensor = self._prepare_mask(mask)
-
-        # 배경 생성
-        if params["use_color"]:
-            background = (
-                torch.tensor(params["color_value"], dtype=torch.float32)
-                .view(3, 1, 1)
-                .repeat(1, *params["shape"][:2])
-            )
-        else:
-            bg_img = cv2.imread(params["background_path"])
-            bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)  # BGR -> RGB
-            bg_img = cv2.resize(bg_img, (params["shape"][1], params["shape"][0]))
-            background = torch.from_numpy(bg_img).permute(2, 0, 1).float()
-
-        if self.random_noise:
-            background = self._add_noise(background)
-
-        # 이미지 합성
-        result = image_tensor * mask_tensor + background * (1 - mask_tensor)
-        result = result.clamp(0, 255).byte()
-
-        return F.to_pil_image(result)
-
-    def forward(self, *inputs):
-        if len(inputs) == 1:
-            inputs = inputs[0]
-
-        image = inputs[0]
-        target = inputs[1]
-
-        # Get transformation parameters
-        params = self.make_params(image)
-
-        if not params["apply_transform"]:
-            return inputs
-
-        # Transform image with masks
-        if "masks" in target:
-            transformed_image = self._transform_single(image, target["masks"], params)
-            transformed_inputs = list(inputs)
-            transformed_inputs[0] = transformed_image
-            return tuple(transformed_inputs)
-
-        return inputs
 
 
 @register()
@@ -1931,10 +820,10 @@ class RandomGaussianNoise(T.Transform):
         p: float = None,
     ) -> None:
         """Args:
-            scale: 고정 노이즈 표준편차 (scale_range가 없을 때 사용)
-            scale_range: [min, max] 범위에서 랜덤 샘플링 (scale보다 우선)
-            per_channel: 채널별 독립 노이즈
-            p: 적용 확률 override
+            scale: fixed noise standard deviation (used when scale_range is absent)
+            scale_range: randomly sampled from [min, max] (takes priority over scale)
+            per_channel: independent noise per channel
+            p: apply probability override
         """
         super().__init__()
         self.scale = scale
@@ -2048,17 +937,17 @@ class RandomAdditionalNoise(T.Transform):
 # ============================================================================
 
 def _gaussian_blur_edge(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
-    """마스크 엣지에 Gaussian blur 적용 (블렌딩용)"""
+    """Apply Gaussian blur to mask edges (for blending)."""
     if kernel_size % 2 == 0:
         kernel_size += 1
     return cv2.GaussianBlur(mask.astype(np.float32), (kernel_size, kernel_size), 0)
 
 
 def _extract_objects(image, target):
-    """이미지에서 물체들을 visib_mask 기반으로 추출.
+    """Extract objects from the image using visib_mask.
 
     Returns:
-        list of dict: 각 물체 정보 (pixels, visib_mask, full_mask, px_count_all, tz, pose, label, box, cam_K)
+        list of dict: per-object info (pixels, visib_mask, full_mask, px_count_all, tz, pose, label, box, cam_K)
     """
     objects = []
     masks = target.get("masks")
@@ -2253,11 +1142,11 @@ def _resize_sample(image, target, target_size):
 
 
 def _depth_composite(objects, background, H, W, edge_blur_kernel=5):
-    """tz 기준 depth ordering으로 캔버스에 합성 (objects는 tz 내림차순 정렬 완료).
+    """Composite objects onto canvas in depth order by tz (objects must be sorted descending by tz).
 
     Returns:
-        canvas: H x W x 3 합성 이미지
-        occupancy: H x W int array (각 픽셀을 소유하는 물체 index, -1=배경)
+        canvas: H x W x 3 composited image
+        occupancy: H x W int array (index of the object owning each pixel, -1 = background)
     """
     canvas = background.copy()
     occupancy = np.full((H, W), -1, dtype=np.int32)
@@ -2280,11 +1169,11 @@ def _depth_composite(objects, background, H, W, edge_blur_kernel=5):
 
 
 def _visibility_filter(objects, occupancy, min_visibility=0.1, min_modal_size=5):
-    """최종 visibility 계산 및 필터링.
+    """Compute final visibility and filter objects below the threshold.
 
     Returns:
-        keep_indices: 유지할 물체의 인덱스 리스트
-        final_masks: 각 물체의 최종 visible mask
+        keep_indices: list of indices of objects to keep
+        final_masks: final visible mask for each kept object
     """
     keep_indices = []
     final_masks = []
@@ -2299,7 +1188,7 @@ def _visibility_filter(objects, occupancy, min_visibility=0.1, min_modal_size=5)
         if visibility < min_visibility:
             continue
 
-        # modal bbox 최소 크기 체크
+        # Check minimum modal bbox size
         vys, vxs = np.where(final_mask > 0)
         if len(vys) == 0:
             continue
@@ -2313,7 +1202,7 @@ def _visibility_filter(objects, occupancy, min_visibility=0.1, min_modal_size=5)
 
 
 def _build_target_from_objects(objects, keep_indices, final_masks, H, W):
-    """필터링된 물체들로 target dict 생성."""
+    """Build a target dict from the filtered set of objects."""
     kept = [objects[i] for i in keep_indices]
     if not kept:
         return None
@@ -2354,7 +1243,7 @@ def _build_target_from_objects(objects, keep_indices, final_masks, H, W):
 
 
 def _load_background_image(background_images, H, W):
-    """배경 이미지 로드 (이미지 목록 또는 랜덤 단색)."""
+    """Load a background image (from image list or random solid color)."""
     import random as _rng
     if background_images:
         bg_path = _rng.choice(background_images)
@@ -2367,7 +1256,7 @@ def _load_background_image(background_images, H, W):
 
 
 def _load_background_list(background_dir):
-    """디렉토리에서 배경 이미지 경로 목록 로드."""
+    """Load a list of background image paths from a directory."""
     from pathlib import Path
     if not background_dir:
         return []
@@ -2386,10 +1275,10 @@ def _load_background_list(background_dir):
 # ============================================================================
 
 def _augment_object_pose(obj, cx, cy, angle_deg, scale, H, W):
-    """인스턴스 하나에 principal point 기준 회전 + zoom 적용 (in-place).
+    """Apply rotation + zoom around the principal point to one instance (in-place).
 
     cv2 CCW angle on y-down image → camera Z-axis rotation by -angle.
-    zoom scale s → tz_new = tz / s (투영 크기 s배 확대).
+    zoom scale s → tz_new = tz / s (projected size enlarged by s).
     """
     if abs(angle_deg) < 0.1 and abs(scale - 1.0) < 1e-4:
         return
@@ -2437,14 +1326,14 @@ class PoseAugmentation(nn.Module):
     Modes
     -----
     per_instance=False (scene mode)
-        모든 instance에 동일 (angle, scale) affine 적용. cam_K cx,cy 기준.
-        rotation_range=0 → zoom only / zoom_range=(1,1) → rotation only / 둘 다
-        지정 시 결합 변환.
+        Applies the same (angle, scale) affine to all instances, centered on cam_K cx,cy.
+        rotation_range=0 → zoom only / zoom_range=(1,1) → rotation only / both
+        specified → combined transform.
 
     per_instance=True (instance mode)
-        각 object별로 독립 (angle, scale) 샘플 → cv2 affine warp →
-        depth-ordered composite. revert_visibility 미만으로 가려진 object는
-        backup으로 rollback.
+        Samples an independent (angle, scale) per object → cv2 affine warp →
+        depth-ordered composite. Objects occluded below revert_visibility are
+        rolled back to their backup.
 
     Math (cv2 image y-down → BOP camera frame, x=right, y=down, z=forward):
         M       = cv2.getRotationMatrix2D((cx, cy), angle_deg, scale)
@@ -2456,22 +1345,24 @@ class PoseAugmentation(nn.Module):
 
     full_masks REQUIREMENT
     ----------------------
-    Geometric warp 후 amodal bbox는 warped `full_masks`에서 nonzero tight box로
-    재계산됨. 따라서 target에 `full_masks`가 없으면 `RuntimeError` 발생 (fail-fast).
-    visib_mask로의 silent fallback은 amodal 학습 시그널을 손상시키므로 금지.
+    After geometric warp, amodal bboxes are recomputed as the nonzero tight box
+    of warped `full_masks`. Targets without `full_masks` raise `RuntimeError`
+    (fail-fast). Silent fallback to visib_mask is prohibited as it corrupts
+    amodal training signal.
 
     Args
     ----
         per_instance     : False = scene-wide / True = per-object
         rotation_range   : ±deg uniform sample. 0 → rotation off
         zoom_range       : (min, max) uniform sample. (1.0, 1.0) → zoom off
-        p                : 적용 확률
-        background_dir   : warp 후 빈 영역(scene mode) / canvas(instance mode)
-                           채움용 image 디렉토리. None이면 fill_value 단색
-        fill_value       : background_dir 없을 때 단색 padding
-        revert_visibility: instance mode에서 변환 후 visibility가 이 값 미만이면 변환 취소
-        edge_blur_kernel : instance mode composite 경계 블렌딩 커널 (0=hard)
-        p_rot180         : 추가 180° flip 확률
+        p                : apply probability
+        background_dir   : directory of images used to fill blank areas after warp
+                           (scene mode) / canvas (instance mode). None → solid fill_value
+        fill_value       : solid-color padding when background_dir is absent
+        revert_visibility: in instance mode, revert transform if post-warp visibility
+                           falls below this threshold
+        edge_blur_kernel : blending kernel for composite edges in instance mode (0=hard)
+        p_rot180         : additional 180° flip probability
     """
 
     def __init__(
@@ -2539,7 +1430,7 @@ class PoseAugmentation(nn.Module):
 
     def _fill_blank(self, warped_img: np.ndarray, valid_mask: np.ndarray,
                     H: int, W: int) -> np.ndarray:
-        """Warp 후 invalid 영역을 background_dir 이미지 / fill_value 단색으로 채움."""
+        """Fill blank areas after warp using a background_dir image or solid fill_value color."""
         if valid_mask.all():
             return warped_img
         if self._background_images:
@@ -2551,7 +1442,7 @@ class PoseAugmentation(nn.Module):
     @staticmethod
     def _warp_masks_3d(masks_np: np.ndarray, M: np.ndarray,
                        H: int, W: int) -> np.ndarray:
-        """[N, H, W] uint8 mask 스택 → 동일한 affine으로 warp."""
+        """Warp a [N, H, W] uint8 mask stack with the same affine."""
         return np.stack(
             [
                 cv2.warpAffine(
@@ -2680,7 +1571,7 @@ class PoseAugmentation(nn.Module):
             Pose(new_poses_data) if isinstance(poses, Pose) else new_poses_data
         )
 
-        # 4) Bbox 재계산 from warped full_masks (amodal)
+        # 4) Recompute bboxes from warped full_masks (amodal)
         new_boxes = self._amodal_boxes_from_full(warped_full)
         new_target["boxes"] = BoundingBoxes(
             torch.from_numpy(new_boxes),
@@ -2688,7 +1579,7 @@ class PoseAugmentation(nn.Module):
             canvas_size=(H, W),
         )
 
-        # 5) px_count_all (rotation 보존, zoom z²) + visibility = visib/px_all
+        # 5) px_count_all (preserved under rotation, scaled by zoom²) + visibility = visib/px_all
         if "px_count_all" in target:
             scale_factor = float(scale) ** 2
             pxa = target["px_count_all"]
@@ -2723,7 +1614,7 @@ class PoseAugmentation(nn.Module):
         if not objects:
             return self._return(image, target, dataset_info)
 
-        # background = non-object pixel median (단색 패치 회피)
+        # background = median color of non-object pixels (avoids solid-color patches)
         img_np = np.array(image)
         all_mask = np.zeros((H, W), dtype=bool)
         for obj in objects:
@@ -2768,7 +1659,7 @@ class PoseAugmentation(nn.Module):
         if merged is None:
             return self._return(image, target, dataset_info)
 
-        # Amodal bbox 재계산: each kept obj's warped full_mask
+        # Recompute amodal bbox from each kept object's warped full_mask
         kept = [objects[i] for i in keep_indices]
         N = len(kept)
         full_arr = np.stack([o["full_mask"] for o in kept], axis=0)
@@ -2786,229 +1677,18 @@ class PoseAugmentation(nn.Module):
         result = PILImage.fromarray(canvas)
         return self._return(result, merged, dataset_info)
 
-# ============================================================================
-# FillSingleClass — single-class scene augmentation for ITODD-like test
-# ============================================================================
 
-@register()
-class FillSingleClass(nn.Module):
-    """Single-class scene augmentation by duplicating one high-visibility object.
-
-    현재 이미지에서 visibility가 가장 높은 물체 1개를 선택,
-    n_target개로 복제하여 각각 랜덤 rotation/zoom 적용 후 depth-ordered composite.
-    배경 교체는 별도 증강(RandomBackgroundWithPresets)에서 처리.
-
-    Args:
-        min_total: 최종 물체 수 하한
-        max_total: 최종 물체 수 상한
-        min_visibility: composite 후 visibility 하한
-        rotation_range: ±도 범위
-        p_rot180: 180° 추가 회전 확률
-        zoom_min: zoom 하한
-        zoom_max: zoom 상한
-        edge_blur_kernel: 엣지 블렌딩 커널 크기
-    """
-
-    def __init__(self, min_total=1, max_total=5,
-                 min_visibility=0.7,
-                 rotation_range=30.0, p_rot180=0.5,
-                 zoom_min=0.9, zoom_max=1.1,
-                 edge_blur_kernel=5,
-                 max_attempts=30):
-        super().__init__()
-        self.min_total = min_total
-        self.max_total = max_total
-        self.min_visibility = min_visibility
-        self.rotation_range = float(rotation_range)
-        self.p_rot180 = float(p_rot180)
-        self.zoom_min = float(zoom_min)
-        self.zoom_max = float(zoom_max)
-        self.edge_blur_kernel = int(edge_blur_kernel)
-        self.max_attempts = int(max_attempts)
-
-    def _select_source(self, target):
-        """Lightweight eligible object selection (no pixel extraction)."""
-        masks = target["masks"]
-        masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
-        pxa_all = target.get("px_count_all")
-
-        eligible = []
-        for i in range(len(masks_np)):
-            visib_area = float(masks_np[i].sum())
-            pxa = float(pxa_all[i]) if pxa_all is not None else visib_area
-            if pxa > 0 and visib_area / pxa >= self.min_visibility:
-                eligible.append(i)
-        return eligible
-
-    def forward(self, *inputs):
-        import random
-        input_tuple = inputs[0] if len(inputs) == 1 else inputs
-
-        if len(input_tuple) >= 3:
-            image, target, dataset = input_tuple[0], input_tuple[1], input_tuple[2]
-        else:
-            return input_tuple
-
-        if "masks" not in target or "poses" not in target:
-            return input_tuple
-        if isinstance(image, torch.Tensor):
-            return input_tuple
-
-        eligible = self._select_source(target)
-        if not eligible:
-            return input_tuple
-        src_idx = random.choice(eligible)
-
-        W, H = image.size
-        img_np = np.array(image)
-
-        masks = target["masks"]
-        masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
-        src_visib = masks_np[src_idx].astype(np.uint8)
-        src_pixels = img_np.copy()
-        src_pixels[src_visib == 0] = 0
-
-        full_masks = target.get("full_masks")
-        fm_np = full_masks.numpy() if torch.is_tensor(full_masks) else np.array(full_masks)
-        src_full = fm_np[src_idx].astype(np.uint8) if full_masks is not None else src_visib.copy()
-
-        poses_data = target["poses"].data if hasattr(target["poses"], 'data') else target["poses"]
-        src_t = poses_data[src_idx, :3].numpy().astype(np.float32)
-        src_R = poses_data[src_idx, 3:].numpy().reshape(3, 3).astype(np.float32)
-        src_label = target["labels"][src_idx:src_idx+1].clone()
-
-        pxa_all = target.get("px_count_all")
-        src_pxa = float(pxa_all[src_idx]) if pxa_all is not None else float(src_visib.sum())
-
-        cam_K = target.get("cam_K")
-        if cam_K is not None:
-            cam_K_np = cam_K[0].numpy() if cam_K.dim() > 1 else cam_K.numpy()
-            # image-plane 회전·zoom 중심은 현재 image (W, H) 좌표계의 진짜 주점이어야 함.
-            # 원본 cam_K(=orig_size 기준)에 image scale ratio를 곱해서 cx, cy로만 사용.
-            # src_cam_K는 원본 그대로 보관 — pose 라벨/criterion/추론 좌표계는 원본 K 유지.
-            # FILLSINGLE_DISABLE_K_CORRECT=1 환경변수로 보정 비활성화 (디버그/비교용)
-            if os.environ.get("FILLSINGLE_DISABLE_K_CORRECT") == "1":
-                sx, sy = 1.0, 1.0
-            else:
-                orig_size = target.get("orig_size")
-                if orig_size is not None:
-                    sx = W / float(orig_size[0])
-                    sy = H / float(orig_size[1])
-                else:
-                    sx, sy = 1.0, 1.0
-            cx = float(cam_K_np[2]) * sx
-            cy = float(cam_K_np[5]) * sy
-            src_cam_K = cam_K[src_idx:src_idx+1].clone() if cam_K.dim() > 1 else cam_K.unsqueeze(0).clone()
-        else:
-            cx, cy = W / 2.0, H / 2.0
-            src_cam_K = None
-
-        boxes = target.get("boxes")
-        src_box = boxes.data[src_idx:src_idx+1].clone() if boxes is not None else None
-
-        n_target = random.randint(self.min_total, self.max_total)
-
-        # Phase 0: 소스 물체 자체를 첫 번째 후보로 확보 (실패 방지)
-        base_candidate = (float(src_visib.sum()) / max(src_pxa, 1),
-                          src_visib, 0.0, 1.0,
-                          np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64))
-
-        # Phase 1: visib_mask만 warp → 가시성 체크 (cheap)
-        light_candidates = []
-        for _ in range(self.max_attempts):
-            angle = random.uniform(-self.rotation_range, self.rotation_range)
-            if random.random() < self.p_rot180:
-                angle += 180.0
-            scale = random.uniform(self.zoom_min, self.zoom_max)
-
-            M = cv2.getRotationMatrix2D((cx, cy), angle, scale)
-            new_visib = cv2.warpAffine(src_visib, M, (W, H), flags=cv2.INTER_NEAREST, borderValue=0)
-
-            new_pxa = src_pxa * scale * scale
-            if new_pxa > 0 and new_visib.sum() / new_pxa < self.min_visibility:
-                continue
-
-            vis_ratio = float(new_visib.sum()) / max(new_pxa, 1)
-            light_candidates.append((vis_ratio, new_visib, angle, scale, M))
-
-        # Phase 2: greedy 비겹침 선택 (mask boolean만)
-        light_candidates.append(base_candidate)
-        light_candidates.sort(key=lambda x: -x[0])
-        chosen = []
-        occupancy = np.zeros((H, W), dtype=bool)
-        for vis_ratio, new_visib, angle, scale, M in light_candidates:
-            if len(chosen) >= n_target:
-                break
-            mask = new_visib > 0
-            visible = float(mask.sum()) - float((mask & occupancy).sum())
-            new_pxa = src_pxa * scale * scale
-            if new_pxa > 0 and visible / new_pxa < self.min_visibility:
-                continue
-            chosen.append((new_visib, angle, scale, M))
-            occupancy |= mask
-
-        # Phase 3: 선택된 것만 pixels + full_mask warp + pose 계산 (expensive)
-        candidates = []
-        for new_visib, angle, scale, M in chosen:
-            new_pixels = cv2.warpAffine(src_pixels, M, (W, H), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
-            new_full = cv2.warpAffine(src_full, M, (W, H), flags=cv2.INTER_NEAREST, borderValue=0)
-            new_pxa = src_pxa * scale * scale
-
-            angle_rad = np.deg2rad(angle)
-            c, s = np.cos(-angle_rad), np.sin(-angle_rad)
-            Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
-            t_new = Rz @ src_t
-            t_new[2] /= scale
-            R_new = Rz @ src_R
-
-            ys, xs = np.nonzero(new_full > 0)
-            if len(xs) == 0:
-                continue
-            new_box = torch.tensor([[xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]], dtype=torch.float32)
-
-            candidates.append({
-                "pixels": new_pixels,
-                "visib_mask": new_visib,
-                "full_mask": new_full,
-                "px_count_all": new_pxa,
-                "pose": torch.from_numpy(np.concatenate([t_new, R_new.reshape(9)])).float(),
-                "tz": float(t_new[2]),
-                "label": src_label.clone(),
-                "box": new_box,
-                "cam_K": src_cam_K.clone() if src_cam_K is not None else None,
-            })
-
-        if not candidates:
-            return input_tuple
-
-        candidates.sort(key=lambda x: -x["tz"])
-
-        background = np.zeros((H, W, 3), dtype=np.uint8)
-        canvas, occ_map = _depth_composite(candidates, background, H, W, self.edge_blur_kernel)
-        keep_indices, final_masks = _visibility_filter(candidates, occ_map, self.min_visibility)
-
-        if not keep_indices:
-            return input_tuple
-
-        merged = _build_target_from_objects(candidates, keep_indices, final_masks, H, W)
-        if merged is None:
-            return input_tuple
-
-        for k in target:
-            if k not in merged:
-                merged[k] = target[k]
-
-        return (PILImage.fromarray(canvas), merged, dataset)
 @register()
 class FilterSmallBoxLowVis(nn.Module):
-    """Modal bbox 최소 크기 + visibility 필터 (BOP visib_fract 기준).
+    """Filter by minimum modal bbox size and visibility (based on BOP visib_fract).
 
-    `target['visibility']`를 그대로 사용. 기하 증강(PoseAugmentation 등)이
-    각자 visibility를 재계산해주는 책임을 가지므로 filter는 단순히 임계값
-    비교만 수행. coco_dataset.py가 어노테이션의 BOP visib_fract를 그대로
-    `target['visibility']`에 저장 → BOP eval과 정합.
+    Reads `target['visibility']` directly. Geometric augmentation ops (e.g.
+    PoseAugmentation) are responsible for recomputing visibility; this filter
+    simply compares against the threshold. coco_dataset.py stores the BOP
+    visib_fract annotation directly in `target['visibility']` for BOP-eval
+    consistency.
 
-    visibility가 target에 없으면 1.0으로 가정 (필터 안 함).
+    If visibility is absent from target, assumes 1.0 (no filtering).
     """
 
     def __init__(
@@ -3058,7 +1738,7 @@ class FilterSmallBoxLowVis(nn.Module):
         heights = np.where(has_any, y_max - y_min, 0)
         size_ok = (widths >= self.min_size) & (heights >= self.min_size) & has_any
 
-        # Visibility check (target['visibility'] 직접 사용; 기하 증강이 갱신).
+        # Visibility check (reads target['visibility'] directly; updated by geometric augmentation).
         if self.min_visib > 0:
             v = target.get("visibility")
             if v is None:
@@ -3077,7 +1757,7 @@ class FilterSmallBoxLowVis(nn.Module):
                 return (image, target, dataset_info)
             return (image, target)
 
-        # 모두 fail이면 target 유지 (criterion이 비어있는 상태 잘 처리하도록).
+        # If all fail, keep original target (so criterion can handle empty batches gracefully).
         if not keep.any():
             if dataset_info is not None:
                 return (image, target, dataset_info)
@@ -3115,9 +1795,9 @@ class FilterSmallBoxLowVis(nn.Module):
 
 @register()
 class BackgroundReplacement:
-    """배경만 교체하는 경량 augmentation.
+    """Lightweight augmentation that replaces only the background.
 
-    RendererAugmentation, RandomTransformAug 모두 적용되지 않은 이미지에만 적용.
+    Applied only when neither RendererAugmentation nor RandomTransformAug has been applied.
     """
 
     def __init__(
@@ -3143,7 +1823,7 @@ class BackgroundReplacement:
         target = input_tuple[1]
         dataset_info = input_tuple[2] if len(input_tuple) > 2 else None
 
-        # 기하학적 augmentation이 이미 적용된 경우 스킵
+        # Skip if geometric augmentation has already been applied
         if target.get("_renderer_aug_applied", False):
             return inputs if len(inputs) > 1 else inputs[0]
         if target.get("_geometric_aug_applied", False):
@@ -3164,20 +1844,20 @@ class BackgroundReplacement:
 
         masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
 
-        # 합산 마스크 (어떤 인스턴스라도 있는 픽셀)
+        # Union mask (pixels belonging to any instance)
         if masks_np.ndim == 3:
             combined = np.any(masks_np > 0, axis=0)
         else:
             combined = masks_np > 0
 
-        # 배경 이미지 로드 및 리사이즈
+        # Load and resize background image
         bg_path = self._background_images[np.random.randint(len(self._background_images))]
         bg_img = PILImage.open(bg_path).convert("RGB")
 
         image_np = np.array(image)
         bg_np = np.array(bg_img.resize((image_np.shape[1], image_np.shape[0])))
 
-        # 배경 교체: 마스크 밖 = 새 배경
+        # Replace background: pixels outside the mask get the new background
         result = image_np.copy()
         result[~combined] = bg_np[~combined]
 
@@ -3237,28 +1917,28 @@ def _depth_aug_stamp_ellipse(depth, valid_region, yy, xx, cy, cx,
 class DepthAugment(nn.Module):
     """Sim-to-real depth augmentation for BOP RGBD pose estimation.
 
-    TLESS test real sensor data 분석 기반 증강:
-    - Object mask boundary에 hole 3x 편향 → clustered_hole_gen (edge_bias)
-    - 중간 거리 scene 영역 (table/floor) 에도 hole → bg_clustered_hole_gen
-    - Far background (Z_MAX 근처)는 제외
-    - Image 테두리에는 hole 생성 안 함
-    - Edge wobble 효과 → wavy_boundary_warp (coherent displacement)
-    - Flying pixel 효과 → boundary_speckle (per-pixel neighbor swap)
-    - GDRNPP 3종도 유지 (fill / gaussian noise)
+    Based on analysis of TLESS test real sensor data:
+    - Holes biased 3x toward object mask boundaries → clustered_hole_gen (edge_bias)
+    - Holes also generated in mid-range scene regions (table/floor) → bg_clustered_hole_gen
+    - Far background (near Z_MAX) excluded
+    - No holes generated at image borders
+    - Edge wobble effect → wavy_boundary_warp (coherent displacement)
+    - Flying pixel effect → boundary_speckle (per-pixel neighbor swap)
+    - Three GDRNPP ops retained (fill / gaussian noise)
 
-    입력: dataset의 `_load_depth_tensor`가 반환한 [0, 1] 정규화 depth tensor.
-    출력: target['_depth_tensor']에 증강된 depth 저장 → __getitem__이 concat 시 사용.
+    Input: [0, 1] normalized depth tensor returned by dataset's `_load_depth_tensor`.
+    Output: augmented depth stored in target['_depth_tensor'] → used by __getitem__ for concat.
 
-    모든 파라미터는 [0, 1] 스케일 기준 (Z_MAX_MM=2000 가정).
-    예: fill_std=0.05 ≈ 100mm, noise_base_std=0.001 ≈ 2mm.
+    All parameters are in [0, 1] scale (assumes Z_MAX_MM=2000).
+    Example: fill_std=0.05 ≈ 100mm, noise_base_std=0.001 ≈ 2mm.
     """
 
     def __init__(
         self,
-        # (1) Zero point fill (기존 hole을 작은 noise로 채움, GDRNPP)
+        # (1) Zero point fill (fills existing holes with small noise, GDRNPP)
         fill_prob: float = 1.0,
         fill_std: float = 0.05,
-        # (2) Wavy boundary warp (mild + tight: 촘촘한 웨이브)
+        # (2) Wavy boundary warp (mild + tight: dense waves)
         wavy_prob: float = 0.7,
         wavy_amplitude: float = 1.5,
         wavy_smoothness: float = 5.0,
@@ -3268,9 +1948,9 @@ class DepthAugment(nn.Module):
         speckle_prob: float = 0.6,
         speckle_thickness: int = 1,
         speckle_swap_prob: float = 0.4,
-        # (4) Object clustered holes (visibility-aware: TLESS real sensor 실측)
-        # 낮은 visibility (occluded sliver) 일수록 real sensor는 depth hole이 더 많음
-        # (Pearson corr = -0.59, 100vs100 분석 기반).
+        # (4) Object clustered holes (visibility-aware: measured from TLESS real sensor)
+        # Lower visibility (heavily occluded) → more depth holes in real sensor
+        # (Pearson corr = -0.59, based on 100-vs-100 analysis).
         obj_hole_prob: float = 0.7,
         obj_n_clusters_min: int = 1,
         obj_n_clusters_max: int = 5,
@@ -3278,7 +1958,7 @@ class DepthAugment(nn.Module):
         obj_cluster_size_max: int = 200,
         obj_edge_bias: float = 0.7,
         obj_image_edge_margin: int = 5,
-        # (5) Background clustered holes (scene 영역, far bg 제외)
+        # (5) Background clustered holes (scene region, excluding far background)
         bg_hole_prob: float = 0.7,
         bg_n_clusters_min: int = 1,
         bg_n_clusters_max: int = 4,
@@ -3286,7 +1966,7 @@ class DepthAugment(nn.Module):
         bg_cluster_size_max: int = 800,
         bg_image_edge_margin: int = 10,
         bg_far_depth_threshold: float = 0.95,
-        # (6) Gaussian noise (valid pixel 전역)
+        # (6) Gaussian noise (applied to all valid pixels)
         noise_prob: float = 0.6,
         noise_base_std: float = 0.001,
         noise_level_max: float = 0.0025,  # iter-random upper bound (GDRNPP style)
@@ -3325,7 +2005,7 @@ class DepthAugment(nn.Module):
     # ------- helpers -------
 
     def _extract_masks(self, target, target_H, target_W):
-        """target['masks']를 depth 해상도에 맞춘 list of bool ndarray로 변환."""
+        """Convert target['masks'] to a list of bool ndarrays at depth resolution."""
         masks = target.get("masks")
         if masks is None:
             return []
@@ -3444,7 +2124,7 @@ class DepthAugment(nn.Module):
     def _target_hole_frac(vis, rng):
         """Empirical hole fraction as a function of visibility (TLESS real).
 
-        실측 (1000 val images):
+        Measured on 1000 val images:
           vis 0.1-0.2: mean 0.59, fully_hole 22.4%
           vis 0.2-0.4: mean 0.34, fully_hole  6.7%
           vis 0.4-0.6: mean 0.13, fully_hole  1.7%
@@ -3468,13 +2148,13 @@ class DepthAugment(nn.Module):
     def _obj_clustered_holes(self, depth, masks, visibilities, rng):
         """Per-mask clustered hole stamping, visibility-aware.
 
-        Real TLESS sensor 실측을 기반으로:
-          - 낮은 visibility (heavily occluded sliver) 물체는 depth hole이 많음
-          - visibility가 높으면 거의 온전한 depth
-        target_hole_frac(visibility)로 mask당 목표 hole 비율을 결정하고,
-        cluster 기반 stamping으로 그 양만큼 hole을 채움.
+        Based on real TLESS sensor measurements:
+          - Low-visibility (heavily occluded) objects have many depth holes
+          - High-visibility objects have mostly intact depth
+        Uses target_hole_frac(visibility) to determine the target hole fraction
+        per mask, then stamps that amount using cluster-based stamping.
 
-        vis < 0.2 의 22%는 전체가 hole이라 valid_mask 전체를 0으로 short-circuit.
+        22% of vis < 0.2 cases are fully holed → short-circuit: set entire valid_mask to 0.
         """
         out = depth.copy()
         H, W = depth.shape
@@ -3491,7 +2171,7 @@ class DepthAugment(nn.Module):
             vis = float(visibilities[idx]) if idx < len(visibilities) else 1.0
 
             target_frac = self._target_hole_frac(vis, rng)
-            # Full hole shortcut: 전체 visible mask를 통째로 0으로
+            # Full hole shortcut: zero out the entire visible mask
             if target_frac >= 0.999:
                 out[vu8.astype(bool)] = 0.0
                 continue
@@ -3505,8 +2185,8 @@ class DepthAugment(nn.Module):
             mask_ys, mask_xs = np.where(valid_mask)
             boundary_ys, boundary_xs = np.where(boundary)
 
-            # Budget-based stamping: 누적 hole이 target_px에 도달할 때까지 cluster 생성.
-            # cluster 크기는 원래 범위 유지 (실측 cluster shape과 일치).
+            # Budget-based stamping: keep generating clusters until cumulative holes reach target_px.
+            # Cluster size stays within the original range (matches measured cluster shapes).
             budget = target_px
             max_stamps = max(self.obj_n_clusters_range[1] * 4, 8)  # safety cap
             stamps = 0
@@ -3604,7 +2284,7 @@ class DepthAugment(nn.Module):
             if len(visibilities) < len(masks):
                 visibilities = visibilities + [1.0] * (len(masks) - len(visibilities))
 
-        # (1) Zero point fill — 기존 hole을 N(0, fill_std)로 채움
+        # (1) Zero point fill — fill existing holes with N(0, fill_std)
         if rng.rand() < self.fill_prob:
             hole_idx = depth == 0
             if hole_idx.any():
@@ -3612,7 +2292,7 @@ class DepthAugment(nn.Module):
                 depth = depth.copy()
                 depth[hole_idx] = fill
 
-        # (2) Wavy boundary warp (mask가 있을 때만 의미 있음)
+        # (2) Wavy boundary warp (only meaningful when masks are present)
         if masks and rng.rand() < self.wavy_prob:
             depth = self._wavy_warp(depth, masks, rng)
 
@@ -3645,7 +2325,7 @@ class DepthAugment(nn.Module):
 
 
 # ============================================================================
-# RendererAugmentation - PyTorch3D 기반 R|t 증강
+# RendererAugmentation - PyTorch3D-based R|t augmentation
 # ============================================================================
 
 # PyRender imports (EGL backend for headless rendering)
@@ -3675,28 +2355,29 @@ _OPEN3D_AVAILABLE = (
 # ============================================================================
 # CopyPasteSingleClass — cross-image same-class CopyPaste with VOC background
 # ============================================================================
-# 1) 현재 image A에서 한 class 선택 (visibility >= min_visibility 필터 통과한
-#    instance 중 1개 = source).
-# 2) 다른 image들에서 동일 class instance candidate K개 수집.
-# 3) candidate를 visibility 내림차순으로 정렬한 뒤 source 및 이미 선택된
-#    instance의 visib_mask와 겹침이 적은 순서로 source 외 2~4개 greedy 선택.
-# 4) source + 추가 N개를 VOC 배경 위에 depth-ordered composite. 각 instance의
-#    pose/cam_K는 원본 그대로 (회전·zoom 변환 없음 — cross-image라 자연 viewpoint).
-# 5) 결과: 동일 class 3~5개 image. val(test_eval) single-class scene 분포 매칭.
+# 1) Select one class from the current image A (source = one instance that passes
+#    the visibility >= min_visibility filter).
+# 2) Collect K same-class instance candidates from other images.
+# 3) Sort candidates by visibility descending, then greedily select 2-4 with least
+#    overlap with the source and already-selected instances' visib_masks.
+# 4) Composite source + N extras depth-ordered on a VOC background. Each instance's
+#    pose/cam_K is kept as-is (no rotation/zoom — natural viewpoints across images).
+# 5) Result: image with 3-5 instances of the same class, matching val/test_eval
+#    single-class scene distribution.
 
 @register()
 class CopyPasteSingleClass(nn.Module):
     """Cross-image same-class CopyPaste with VOC background.
 
     Args:
-        voc_root: VOC2012 JPEGImages (또는 임의 background) 디렉토리.
-            None이면 random 단색 fallback.
-        p: 적용 확률.
-        min_extra, max_extra: source 외 추가할 instance 수 (기본 2~4 → 총 3~5).
-        candidate_pool_size: 다른 image에서 미리 모을 same-class 후보 수.
-        min_visibility: source/candidate 필터 + composite 후 visibility 필터.
-        max_attempts: candidate 수집 시 최대 image sampling 시도.
-        edge_blur_kernel: composite 엣지 블렌딩 커널 (0=hard edge).
+        voc_root: VOC2012 JPEGImages (or arbitrary background) directory.
+            None falls back to a random solid color.
+        p: apply probability.
+        min_extra, max_extra: number of instances to add beyond the source (default 2~4 → total 3~5).
+        candidate_pool_size: number of same-class candidates to collect from other images.
+        min_visibility: visibility filter for source/candidates and after compositing.
+        max_attempts: maximum image sampling attempts during candidate collection.
+        edge_blur_kernel: blending kernel for composite edges (0=hard edge).
     """
 
     def __init__(
@@ -3707,7 +2388,7 @@ class CopyPasteSingleClass(nn.Module):
         max_extra: int = 4,
         candidate_pool_size: int = 16,
         min_visibility: float = 0.1,
-        max_bbox_iou: float = 1.0,    # bbox IoU 임계값. >이면 reject. 1.0=disabled
+        max_bbox_iou: float = 1.0,    # bbox IoU threshold. >this rejects. 1.0=disabled
         max_attempts: int = 30,
         edge_blur_kernel: int = 0,
         cc_textures_dir: str = None,
@@ -3936,7 +2617,7 @@ class CopyPasteSingleClass(nn.Module):
 
         Stats: mean ~40 (TEST matched), range 3-83 (slightly wider than TEST).
           - 90% grayscale (R=G=B), 10% per-channel colored
-          - base brightness: uniform [10, 70] (test_real mean 40 위주)
+          - base brightness: uniform [10, 70] (centered around test_real mean 40)
           - gradient mode (random):
               50% linear (random 2D direction, ±20)
               30% radial (random center, distance-based, ±25)
@@ -3998,7 +2679,7 @@ class CopyPasteSingleClass(nn.Module):
         labels = target["labels"]
         pxa_all = target.get("px_count_all")
 
-        # (1) source 후보 (visibility 통과)
+        # (1) Source candidates (visibility filter)
         eligible = []
         for i in range(len(masks_np)):
             visib_area = float(masks_np[i].sum())
@@ -4017,9 +2698,9 @@ class CopyPasteSingleClass(nn.Module):
 
         W, H = image.size
 
-        # (2) 다른 image에서 same-class candidate 수집
-        # dataset.class_to_image_idx cache가 있으면 random retry 없이 O(1) lookup,
-        # 없으면 fallback으로 random idx + retry. label→cat_id 변환 후 lookup.
+        # (2) Collect same-class candidates from other images.
+        # If dataset.class_to_image_idx cache is available, use O(1) lookup without retries;
+        # otherwise fall back to random idx + retry. Convert label → cat_id before lookup.
         cache = getattr(dataset, "class_to_image_idx", None)
         if cache is not None and getattr(dataset, "mscoco_label2category", None):
             src_cat_id = dataset.mscoco_label2category.get(src_class, src_class)
@@ -4027,8 +2708,8 @@ class CopyPasteSingleClass(nn.Module):
             src_cat_id = src_class
         pool = cache.get(src_cat_id) if cache else None
 
-        # cache 기반 lookup일 때만 load_item light-mode 사용 가능
-        # (cache의 image는 같은 class ann이 보장되어 light-mode가 거의 즉시 매치).
+        # light-mode for load_item is only viable with cache-based lookup
+        # (cache images are guaranteed to have the same class annotation → near-instant match).
         use_light_mode = pool is not None and cache is not None
 
         candidates = []
@@ -4060,8 +2741,8 @@ class CopyPasteSingleClass(nn.Module):
                 continue
             if not isinstance(other_img, PILImage.Image):
                 continue
-            # candidate가 raw size (1280x960) 이면 현재 image (post-Resize) 크기로 맞춤.
-            # pose/cam_K는 metric/original frame이라 그대로, image-plane만 비례 scale.
+            # If candidate is at raw size (1280x960), resize to current image (post-Resize) size.
+            # pose/cam_K stays in metric/original frame; only image-plane fields are scaled.
             if other_img.size != image.size:
                 other_img, other_target = _resize_sample(
                     other_img, other_target, image.size
@@ -4076,7 +2757,7 @@ class CopyPasteSingleClass(nn.Module):
             o_pxa = other_target.get("px_count_all")
 
             if use_light_mode:
-                # light-mode: target이 이미 src_class 1개 instance만 가짐
+                # light-mode: target already contains only one src_class instance
                 same_idx_list = list(range(len(o_labels)))
             else:
                 same_idx_list = [
@@ -4105,7 +2786,7 @@ class CopyPasteSingleClass(nn.Module):
         if not candidates:
             return sample
 
-        # (3) visibility ↓ 정렬 → greedy 비겹침 (source 외 2~4)
+        # (3) Sort by visibility descending → greedy non-overlapping selection (2~4 beyond source)
         candidates.sort(key=lambda x: -x.get("_visib", 0.0))
         n_extra = random.randint(self.min_extra, self.max_extra)
 
@@ -4131,7 +2812,7 @@ class CopyPasteSingleClass(nn.Module):
                 continue
             if visible / cand_pxa < self.min_visibility:
                 continue
-            # bbox IoU filter (test_eval은 거의 isolated; cluttered overlap 학습 분포 외)
+            # bbox IoU filter (test_eval scenes are nearly isolated; cluttered overlap is out of training distribution)
             if self.max_bbox_iou < 1.0 and cand.get("box") is not None:
                 cb = cand["box"]
                 cb_arr = cb.numpy()[0] if hasattr(cb, "numpy") else np.asarray(cb)[0]
@@ -4152,10 +2833,10 @@ class CopyPasteSingleClass(nn.Module):
         if len(chosen) <= 1:
             return sample
 
-        # (4) depth-ordered composite. voc_root에 이미지 있으면 VOC 사용,
-        # cc_textures_dir이 있으면 V_cc_lite PBR-lite 배경 사용,
-        # 없으면 test_real-style 단색 회색 + 노이즈 + gradient (학습 distribution
-        # 을 test 회색 배경에 맞춤; FP background-as-object 케이스 완화).
+        # (4) Depth-ordered composite. Use VOC if voc_root has images,
+        # V_cc_lite PBR-lite background if cc_textures_dir is set,
+        # otherwise test_real-style solid gray + noise + gradient (aligns training
+        # distribution to test gray background; mitigates FP background-as-object cases).
         chosen.sort(key=lambda x: -x["tz"])
         voc_paths = self._voc_list()
         cc_paths = self._cc_texture_list()
@@ -4197,11 +2878,12 @@ class CopyPasteSingleClass(nn.Module):
 # Other RACE6D photometric ops (RandomGrayscale, ColorJitter, etc.) are
 # untouched, so existing per-dataset configs keep working.
 
-# gdrnpp/yolox itodd `COLOR_AUG_CODE` 와 골격 동일하나 4개 enhance op의 극단
-# 강도(Sharpness 50배, Contrast 50배 / 0.2배, Brightness 6배 / 0.1배, Color 20배)를
-# 좁힌 ITODD-tuned default. 학습 시 일부 sample이 saturate되어 물체 식별 불가가
-# 되는 현상을 방지. wide variation은 유지. Invert는 그대로 둠. 원본 gdrn 강도가
-# 필요하면 GDRNPhotoAug(code=...) 로 직접 지정 가능.
+# Structurally identical to gdrnpp/yolox itodd `COLOR_AUG_CODE`, but with the
+# extreme intensities of the 4 enhance ops narrowed (Sharpness 50x, Contrast 50x/0.2x,
+# Brightness 6x/0.1x, Color 20x) → ITODD-tuned default. Prevents some training
+# samples from becoming so saturated that the object is unrecognizable, while
+# keeping wide variation. Invert is left unchanged. Use GDRNPhotoAug(code=...)
+# to specify the original gdrn intensities directly.
 _GDRN_DEFAULT_AUG_CODE = (
     "Sequential(["
     "Sometimes(0.5, CoarseDropout(p=0.2, size_percent=0.05)),"
@@ -4314,3 +2996,335 @@ class GDRNGrayscale(nn.Module):
         img_aug = aug.augment_image(img_np)
         new_image = PILImage.fromarray(img_aug)
         return (new_image,) + tuple(sample[1:])
+
+
+# =====================================================================
+# Unused augmentations — kept for reference / future experiments only.
+# Not referenced by any YAML config in configs/race6d/. Do not remove
+# without checking configs and external usage.
+# =====================================================================
+
+
+# (unused) Pad image/target to a fixed spatial size (torchvision T.Pad subclass).
+@register()
+class PadToSize(T.Pad):
+    _transformed_types = (
+        PILImage.Image,
+        Image,
+        Video,
+        Mask,
+        BoundingBoxes,
+    )
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        sp = F.get_size(flat_inputs[0])
+        h, w = self.size[1] - sp[0], self.size[0] - sp[1]
+        self.padding = [0, 0, w, h]
+        return dict(padding=self.padding)
+
+    def __init__(self, size, fill=0, padding_mode="constant") -> None:
+        if isinstance(size, int):
+            size = (size, size)
+        self.size = size
+        super().__init__(0, fill, padding_mode)
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        fill = self._fill[type(inpt)]
+        padding = params["padding"]
+        return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
+
+    def __call__(self, *inputs: Any) -> Any:
+        outputs = super().forward(*inputs)
+        if len(outputs) > 1 and isinstance(outputs[1], dict):
+            outputs[1]["padding"] = torch.tensor(self.padding)
+        return outputs
+
+
+
+# (unused) Multiply pixel brightness by a random factor.
+@register()
+class RandomBrightness(T.Transform):
+    """GDRNPP-style brightness adjustment.
+
+    GDRNPP: Sometimes(0.5, pillike.EnhanceBrightness(factor=(0.1, 6.)))
+    factor 0 = black, 1 = original, >1 = brighter
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(self, factor_range: Tuple[float, float] = (0.4, 2.5)) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.aug_manager = AugmentationManager()
+        self.p = self.aug_manager.get_probability("brightness")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        factor = float(
+            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+        )
+        return {"apply": True, "factor": factor}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            from PIL import ImageEnhance
+
+            enhancer = ImageEnhance.Brightness(inpt)
+            return enhancer.enhance(params["factor"])
+        return inpt
+
+
+
+# (unused) Scale contrast around per-channel mean by a random factor.
+@register()
+class RandomContrast(T.Transform):
+    """GDRNPP-style contrast adjustment.
+
+    GDRNPP: Sometimes(0.3, pillike.EnhanceContrast(factor=(0.2, 50.)))
+    factor 0 = gray, 1 = original, >1 = increased contrast
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(self, factor_range: Tuple[float, float] = (0.5, 3.0)) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.aug_manager = AugmentationManager()
+        self.p = self.aug_manager.get_probability("contrast")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        factor = float(
+            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+        )
+        return {"apply": True, "factor": factor}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            from PIL import ImageEnhance
+
+            enhancer = ImageEnhance.Contrast(inpt)
+            return enhancer.enhance(params["factor"])
+        return inpt
+
+
+
+# (unused) Linear contrast scaling with per-channel option (imgaug-style).
+@register()
+class RandomLinearContrast(T.Transform):
+    """GDRNPP-style linear contrast adjustment.
+
+    GDRNPP: Sometimes(0.5, iaa.contrast.LinearContrast((0.5, 2.2), per_channel=0.3))
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(
+        self,
+        factor_range: Tuple[float, float] = (0.5, 2.2),
+        per_channel_prob: float = 0.3,
+    ) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.per_channel_prob = per_channel_prob
+        self.aug_manager = AugmentationManager()
+        self.p = self.aug_manager.get_probability("linear_contrast")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        per_channel = torch.rand(1) < self.per_channel_prob
+        if per_channel:
+            factors = [
+                float(
+                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+                )
+                for _ in range(3)
+            ]
+        else:
+            f = float(
+                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+            )
+            factors = [f, f, f]
+        return {"apply": True, "factors": factors, "per_channel": per_channel}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            img_array = np.array(inpt, dtype=np.float32)
+            mean = 128.0
+            for c in range(3):
+                img_array[:, :, c] = (img_array[:, :, c] - mean) * params["factors"][
+                    c
+                ] + mean
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            return PILImage.fromarray(img_array)
+        return inpt
+
+
+
+# (unused) Blend RGB with grayscale by a random alpha.
+@register()
+class RandomGrayscale(T.Transform):
+    """GDRNPP-style grayscale conversion.
+
+    GDRNPP: Sometimes(0.5, Grayscale(alpha=(0.0, 1.0)))
+    alpha 0 = original, 1 = fully grayscale, intermediate = blended
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(self, alpha_range: Tuple[float, float] = (0.0, 1.0), p: float = None) -> None:
+        super().__init__()
+        self.alpha_range = alpha_range
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else self.aug_manager.get_probability("grayscale")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        alpha = float(torch.empty(1).uniform_(self.alpha_range[0], self.alpha_range[1]))
+        return {"apply": True, "alpha": alpha}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            alpha = params["alpha"]
+            arr = np.array(inpt)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            if alpha >= 1.0:
+                gray_3ch = cv2.merge([gray, gray, gray])
+                return PILImage.fromarray(gray_3ch)
+            gray_3ch = cv2.merge([gray, gray, gray])
+            blended = cv2.addWeighted(arr, 1.0 - alpha, gray_3ch, alpha, 0)
+            return PILImage.fromarray(blended)
+        return inpt
+
+
+
+# (unused) Add a random offset to pixel values (additive jitter).
+@register()
+class RandomAdd(T.Transform):
+    """GDRNPP-style additive brightness shift.
+
+    GDRNPP: Sometimes(0.5, Add((-25, 25), per_channel=0.3))
+    Adds the same value to all pixels.
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(
+        self, value_range: Tuple[int, int] = (-25, 25), per_channel_prob: float = 0.3
+    ) -> None:
+        super().__init__()
+        self.value_range = value_range
+        self.per_channel_prob = per_channel_prob
+        self.aug_manager = AugmentationManager()
+        self.p = self.aug_manager.get_probability("add_value")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        per_channel = torch.rand(1) < self.per_channel_prob
+        if per_channel:
+            values = [
+                int(
+                    torch.randint(
+                        self.value_range[0], self.value_range[1] + 1, (1,)
+                    ).item()
+                )
+                for _ in range(3)
+            ]
+        else:
+            v = int(
+                torch.randint(self.value_range[0], self.value_range[1] + 1, (1,)).item()
+            )
+            values = [v, v, v]
+        return {"apply": True, "values": values}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            img_array = np.array(inpt, dtype=np.float32)
+            for c in range(3):
+                img_array[:, :, c] += params["values"][c]
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            return PILImage.fromarray(img_array)
+        return inpt
+
+
+
+# (unused) Multiply pixel values by a random factor (multiplicative jitter).
+@register()
+class RandomMultiply(T.Transform):
+    """GDRNPP-style multiplicative contrast/brightness scaling.
+
+    GDRNPP: Sometimes(0.5, Multiply((0.6, 1.4), per_channel=0.5))
+    Multiplies all pixels by the same factor.
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(
+        self,
+        factor_range: Tuple[float, float] = (0.6, 1.4),
+        per_channel_prob: float = 0.5,
+    ) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.per_channel_prob = per_channel_prob
+        self.aug_manager = AugmentationManager()
+        self.p = self.aug_manager.get_probability("multiply")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        per_channel = torch.rand(1) < self.per_channel_prob
+        if per_channel:
+            factors = [
+                float(
+                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+                )
+                for _ in range(3)
+            ]
+        else:
+            f = float(
+                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+            )
+            factors = [f, f, f]
+        return {"apply": True, "factors": factors}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            img_array = np.array(inpt, dtype=np.float32)
+            for c in range(3):
+                img_array[:, :, c] *= params["factors"][c]
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            return PILImage.fromarray(img_array)
+        return inpt
+
+
+

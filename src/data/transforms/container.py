@@ -72,53 +72,52 @@ class Compose(T.Compose):
 
     def clone_image_target(self, sample):
         """
-        (image, target, dataset) 형태의 sample에서, dataset 복제는 제외하고
-        image와 target(dict)만 복제하는 헬퍼 함수.
-        torchvision.datapoints (Image, BoundingBox, Mask 등)이 들어있는 경우
-        copy.deepcopy() 대신 각각 .clone() 등을 사용해 복제한다.
+        Helper that clones only image and target(dict) from a
+        (image, target, dataset) sample, excluding the dataset itself.
+        When torchvision.datapoints (Image, BoundingBoxes, Mask, ...) are present,
+        uses .clone() instead of copy.deepcopy().
         """
         image, target, dataset = sample
 
         # ─────────────────────────────────────────────────────────────
-        # 1) image 복제
+        # 1) Clone image
         #   - PIL.Image : image.copy()
-        #   - Tensor or Datapoint : .clone() 사용
+        #   - Tensor or Datapoint : use .clone()
         # ─────────────────────────────────────────────────────────────
         if isinstance(image, Image):
             # torchvision.datapoints.Image => .clone()
             cloned_image = image.clone()
         elif isinstance(image, torch.Tensor):
-            # 일반 tensor라면 .clone()
+            # plain tensor -> .clone()
             cloned_image = image.clone()
         elif isinstance(image, PILImage.Image):
-            # PIL.Image 계열이면 copy()
+            # PIL.Image subclass -> copy()
             cloned_image = image.copy()
         else:
-            # 그 외엔 상황에 따라 deepcopy 시도 (필요 시 예외처리)
+            # fallback: attempt deepcopy (add exception handling if needed)
             cloned_image = copy.deepcopy(image)
 
         # ─────────────────────────────────────────────────────────────
-        # 2) target 복제
-        #   - target 내부에 Tensor, Datapoint, PIL.Image 등이 섞여 있을 수 있음
-        #   - dict 항목별로 분기 처리
+        # 2) Clone target
+        #   - target may contain a mix of Tensor, Datapoint, PIL.Image, etc.
+        #   - handle each dict entry with type-specific branching
         # ─────────────────────────────────────────────────────────────
         cloned_target = {}
         for k, v in target.items():
             # case 1) Datapoint (BoundingBox, Mask, Image, Video...)
             if isinstance(v, (BoundingBoxes, Mask, Pose, Image)):
                 cloned_target[k] = v.clone()
-            # case 2) 일반 Tensor
+            # case 2) plain Tensor
             elif isinstance(v, torch.Tensor):
                 cloned_target[k] = v.clone()
             # case 3) PIL.Image
             elif hasattr(v, "copy"):
                 cloned_target[k] = v.copy()
             else:
-                # 나머지는 copy.deepcopy 시도 or 그냥 그대로 참조
-                # 필요에 따라 골라 사용
+                # fallback: deepcopy, or keep reference as needed
                 cloned_target[k] = copy.deepcopy(v)
 
-        # dataset은 그대로 참조만 유지
+        # dataset is kept as a reference only
         return cloned_image, cloned_target
 
     # Transforms that may remove or invalidate masks and need rollback protection.
@@ -129,7 +128,6 @@ class Compose(T.Compose):
             "CopyPasteSingleClass",
             "PoseAugmentation",
             "RandomCoarseDropout",
-            "RandomObjectOcclusion",
             "Mosaic",
             "RandomRotateExpand",
         }
@@ -143,12 +141,12 @@ class Compose(T.Compose):
         policy_ops = self.policy["ops"]
         policy_epoch = self.policy["epoch"]
 
-        # epoch이 리스트면 [start, stop] — start 전이거나 stop 이후면 끔
+        # If policy_epoch is a list, interpret as [start, stop] — disable aug before start or after stop
         if isinstance(policy_epoch, (list, tuple)) and len(policy_epoch) == 2:
             start_epoch, stop_epoch = policy_epoch
             aug_active = start_epoch <= cur_epoch < stop_epoch
         else:
-            # 기존 방식: epoch 이후에 끔
+            # Legacy mode: disable after the given epoch
             start_epoch, stop_epoch = 0, policy_epoch
             aug_active = cur_epoch < stop_epoch
 

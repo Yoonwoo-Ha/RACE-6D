@@ -16,10 +16,10 @@ from ...core import register
 
 @register()
 class RACE6DCriterion_addr(nn.Module):
-    """ DETR의 손실을 계산하는 클래스.
-    과정:
-        1) 모델의 출력과 정답 박스 간 헝가리안 매칭을 계산
-        2) 매칭된 각 쌍에 대해 감독 학습(클래스와 박스 모두)
+    """ Class for computing DETR losses.
+    Process:
+        1) Compute Hungarian matching between model outputs and ground-truth boxes
+        2) Supervise each matched pair (both class and box)
     """
     __share__ = ['num_classes']
     __inject__ = ['matcher']
@@ -41,11 +41,11 @@ class RACE6DCriterion_addr(nn.Module):
         **kwargs):
         """
         Parameters:
-            matcher: 타겟과 제안 간 매칭을 계산할 수 있는 모듈
-            num_classes: 객체 카테고리 수
-            weight_dict: 손실 이름을 키로, 상대적 가중치를 값으로 하는 딕셔너리
-            losses: 적용할 모든 손실의 리스트
-            boxes_weight_format: 박스 가중치의 형식
+            matcher: module that can compute a matching between targets and proposals
+            num_classes: number of object categories
+            weight_dict: dict with loss names as keys and their relative weights as values
+            losses: list of all losses to apply
+            boxes_weight_format: format of the box weight
         """
         super().__init__()
         self.num_classes = num_classes
@@ -55,14 +55,14 @@ class RACE6DCriterion_addr(nn.Module):
         self.losses = losses
         self.boxes_weight_format = boxes_weight_format
         # Pose-aware score target (boxes_weight_format='iou_pose')
-        #   values = ADD-R/diameter based pose_quality in [0, 1] (bbox IoU 미반영)
+        #   values = ADD-R/diameter based pose_quality in [0, 1] (bbox IoU not reflected)
         self.pose_quality_scale = float(pose_quality_scale)
         self.share_matched_indices = share_matched_indices
         self.compute_aux_metrics = bool(compute_aux_metrics)
         self.alpha = alpha
         self.gamma = gamma
-        # MAL/VFL용: positive target은 gamma_pos, negative weight는 gamma_neg
-        # 미지정 시 기존 gamma로 fallback (backward compat)
+        # For MAL/VFL: positive target uses gamma_pos, negative weight uses gamma_neg
+        # Falls back to existing gamma if unspecified (backward compat)
         self.gamma_pos = gamma_pos if gamma_pos is not None else gamma
         self.gamma_neg = gamma_neg if gamma_neg is not None else gamma
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -80,8 +80,8 @@ class RACE6DCriterion_addr(nn.Module):
         self.valid_label_ids = []
 
     def set_pose_source(self, decoder):
-        """Decoder의 pose buffer를 참조하여 criterion 데이터 교체.
-        Solver에서 model/criterion 생성 후 호출."""
+        """Reference the decoder's pose buffer to replace criterion data.
+        Called from the solver after model/criterion creation."""
         self.keypoints_3d = decoder.keypoints_3d
         self.edges_mask = decoder.edges_mask
         self.sym_cache = decoder.get_sym_cache()
@@ -103,23 +103,24 @@ class RACE6DCriterion_addr(nn.Module):
             )
 
     def _get_orig_size(self, targets):
-        """targets에서 원본 이미지 크기 (w, h) 반환.
+        """Return the original image size (w, h) from targets.
 
-        Criterion은 학습 전용이므로 targets에는 항상 orig_size가 있어야 한다.
+        Since criterion is training-only, targets must always contain orig_size.
         """
         orig_size = targets[0]['orig_size']  # [W, H]
         return float(orig_size[0]), float(orig_size[1])
 
     def get_symmetry_type(self, label_id: int) -> str:
         """
-        객체의 대칭성 타입을 판별
+        Determine the symmetry type of an object.
 
-        반환 string은 내부에서 오직 `== 'asymmetric'` 이진 분기에만 사용됨.
-        실제 대칭 회전 행렬은 decoder가 만든 `sym_cache[label_id]`에 임의 축 포함
-        Rodrigues로 정확히 계산돼 있으므로, 여기선 "대칭 여부"만 판단하면 됨.
+        The returned string is used only in a binary `== 'asymmetric'` branch internally.
+        The actual symmetry rotation matrices in `sym_cache[label_id]` are precomputed by
+        the decoder via Rodrigues (with arbitrary axes), so only "is symmetric" needs to
+        be decided here.
 
         Args:
-            label_id: 리맵된 레이블 ID (0-index)
+            label_id: remapped label ID (0-indexed)
 
         Returns:
             str: 'asymmetric', 'continuous_symmetric', 'discrete_symmetric'
@@ -179,7 +180,7 @@ class RACE6DCriterion_addr(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
 
-        # IoU 계산
+        # Compute IoU
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
@@ -195,10 +196,10 @@ class RACE6DCriterion_addr(nn.Module):
         target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)
         target_score_o[idx] = ious.to(target_score_o.dtype)
         target_score = target_score_o.unsqueeze(-1) * target
-        target_score = target_score.pow(self.gamma_pos)  # positive target에 gamma_pos 적용
+        target_score = target_score.pow(self.gamma_pos)  # apply gamma_pos to positive targets
 
         pred_score = torch.sigmoid(src_logits).detach()
-        weight = self.alpha * pred_score.pow(self.gamma_neg) * (1 - target) + target  # negative weight에 gamma_neg
+        weight = self.alpha * pred_score.pow(self.gamma_neg) * (1 - target) + target  # gamma_neg for negative weight
 
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
@@ -230,7 +231,7 @@ class RACE6DCriterion_addr(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
 
         if compute_metrics:
-            # Per-component bbox error in pixels (orig_size 기준)
+            # Per-component bbox error in pixels (relative to orig_size)
             orig_w, orig_h = self._get_orig_size(targets)
             if len(src_boxes) > 0:
                 diff = (src_boxes - target_boxes).abs()
@@ -252,7 +253,7 @@ class RACE6DCriterion_addr(nn.Module):
         img_w, img_h = self._get_orig_size(targets)
 
         idx = self._get_src_permutation_idx(indices)
-        src_kpts = outputs['pred_keypoints'][idx].float()  # [N, K*2] bbox-relative, FP32 강제
+        src_kpts = outputs['pred_keypoints'][idx].float()  # [N, K*2] bbox-relative, forced to FP32
 
         if src_kpts.dim() == 2 and src_kpts.size(-1) == 64:
             src_kpts = src_kpts.reshape(-1, 32, 2)  # [N, 32, 2] bbox-relative
@@ -270,11 +271,11 @@ class RACE6DCriterion_addr(nn.Module):
                 empty['metric_kpt_error'] = torch.tensor(0.0, device=device)
             return empty
 
-        # GT 데이터 수집
+        # Collect GT data
         target_poses  = torch.cat([t['poses'][j]  for t, (_, j) in zip(targets, indices)], dim=0)  # [N,12]
         target_labels = torch.cat([t['labels'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N]
 
-        # GT R, t 복원 (raw mm)
+        # Recover GT R, t (raw mm)
         R_gt = target_poses[:, 3:].reshape(-1, 3, 3)  # [N,3,3]
 
         # cam_K from targets (per-instance)
@@ -283,14 +284,14 @@ class RACE6DCriterion_addr(nn.Module):
 
         t_gt = self._c2t_gt(target_poses[:, :3], cam_K)  # [N,3] - (tx, ty, tz) in mm
 
-        # pred bbox-relative → pixel (GT boxes 사용)
+        # pred bbox-relative -> pixel (using GT boxes)
         target_boxes = torch.cat([t['boxes'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N,4]
         pred_pix = self._bbox_relative_to_pixel(src_kpts, target_boxes, img_w, img_h)  # [N, 32, 2]
 
-        # Bbox area (픽셀 단위) — GT boxes for OKS scale
+        # Bbox area (in pixels) - GT boxes for OKS scale
         bbox_area_pix = (target_boxes[:, 2] * img_w) * (target_boxes[:, 3] * img_h)  # [N]
 
-        # 클래스별로 계산
+        # Compute per class
         unique_cls = torch.unique(target_labels)
         per_inst_l1_losses = []
         per_inst_cr_losses = []
@@ -309,55 +310,55 @@ class RACE6DCriterion_addr(nn.Module):
             if M == 0:
                 continue
 
-            # 클래스 데이터 추출
+            # Extract per-class data
             Rg = R_gt[mask]                     # [M,3,3]
             tg = t_gt[mask]                     # [M,3]
-            bbox_area = bbox_area_pix[mask]     # [M] - 픽셀 area
-            pred = pred_pix[mask]               # [M,32,2] - 픽셀 좌표
+            bbox_area = bbox_area_pix[mask]     # [M] - pixel area
+            pred = pred_pix[mask]               # [M,32,2] - pixel coordinates
             Kg = cam_K[mask]                    # [M,3,3] - per-instance intrinsics
             fx = Kg[:, 0, 0][:, None, None]     # [M,1,1]
             fy = Kg[:, 1, 1][:, None, None]
             px = Kg[:, 0, 2][:, None, None]
             py = Kg[:, 1, 2][:, None, None]
 
-            # 3D 키포인트 32개 로드
+            # Load 32 3D keypoints
             kp3d_cls = self.keypoints_3d[category_id - 1].to(device)  # [32,3]
             kp3d = kp3d_cls.unsqueeze(0).expand(M, -1, -1)              # [M,32,3]
 
-            # 캐시에서 대칭 변환 가져오기
+            # Fetch symmetry transforms from the cache
             sym_Rs = self.sym_cache.get(label_id)
             if sym_Rs is None:
                 sym_Rs = torch.eye(3, device=device).unsqueeze(0)
             S = sym_Rs.shape[0]
 
-            # === GT 키포인트 생성 (모든 대칭) ===
-            # 1. 등가 포즈 생성
+            # === Generate GT keypoints (all symmetries) ===
+            # 1. Generate equivalent poses
             R_prime = torch.matmul(Rg.unsqueeze(1), sym_Rs.unsqueeze(0))  # [M,S,3,3]
             t_prime = tg.unsqueeze(1)  # [M,1,3]
 
-            # 2. 32개 키포인트를 3D → 2D 투영 (픽셀)
+            # 2. Project 32 keypoints from 3D to 2D (pixels)
             X_cam = torch.einsum('msij, mkj -> mski', R_prime, kp3d) + t_prime.unsqueeze(2)  # [M,S,32,3]
-            # NOTE: clamp는 mm 단위. 1mm 이하로 내려가는 물리적 상황은 없음.
-            # 1e-6은 fp16 subnormal 영역이라 AMP 하에서 underflow 위험.
+            # NOTE: clamp is in mm. Physical situations below 1mm do not occur.
+            # 1e-6 sits in the fp16 subnormal range and risks underflow under AMP.
             Z = X_cam[..., 2].clamp_min(1.0)  # [M,S,32]
             u_pix = fx * (X_cam[..., 0] / Z) + px  # [M,S,32]
             v_pix = fy * (X_cam[..., 1] / Z) + py  # [M,S,32]
 
-            tgt_pix = torch.stack([u_pix, v_pix], dim=-1)  # [M,S,32,2] - 픽셀 좌표
+            tgt_pix = torch.stack([u_pix, v_pix], dim=-1)  # [M,S,32,2] - pixel coordinates
 
-            # === 예측 키포인트 확장 ===
-            pred_exp = pred.unsqueeze(1).expand(-1, S, -1, -1)  # [M,S,32,2] 픽셀
+            # === Expand predicted keypoints ===
+            pred_exp = pred.unsqueeze(1).expand(-1, S, -1, -1)  # [M,S,32,2] pixels
 
             # === 1. L1 Loss (image-normalized space) ===
-            diff = pred_exp - tgt_pix  # [M,S,32,2] 픽셀 단위
+            diff = pred_exp - tgt_pix  # [M,S,32,2] in pixel units
             diff_img = diff.clone()
             diff_img[..., 0] = diff[..., 0] / img_w
             diff_img[..., 1] = diff[..., 1] / img_h
             l1_per_point = torch.abs(diff_img).sum(dim=-1)  # [M,S,32]
             l1_per_symmetry = l1_per_point.sum(dim=-1)  # [M,S]
 
-            # === 2. OKS Loss (픽셀 공간에서) ===
-            s_pix = torch.sqrt(bbox_area)  # [M] - 픽셀 스케일
+            # === 2. OKS Loss (in pixel space) ===
+            s_pix = torch.sqrt(bbox_area)  # [M] - pixel scale
 
             ki = 0.1
             squared_dist_pix = torch.sum((pred_exp - tgt_pix) ** 2, dim=-1)  # [M,S,32]
@@ -366,42 +367,42 @@ class RACE6DCriterion_addr(nn.Module):
             exp_term = torch.exp(-squared_dist_pix / (2 * s_expanded ** 2 * ki ** 2))  # [M,S,32]
             oks_per_symmetry = 1.0 - exp_term.sum(dim=-1) / 32.0  # [M,S]
 
-            # === 3. 최적 대칭 선택 (pose loss와 일관) ===
+            # === 3. Pick the best symmetry (consistent with pose loss) ===
             batch_indices = torch.arange(M, device=device)
             if hasattr(self, '_cached_sym_indices') and self._cached_sym_indices is not None:
-                # pose loss에서 결정된 symmetry index 사용 (ADD-R 기준)
+                # Use the symmetry index decided by pose loss (ADD-R based)
                 min_indices = self._cached_sym_indices[mask]
                 min_oks_values = oks_per_symmetry[batch_indices, min_indices]
             else:
-                # fallback: OKS 기준 자체 선택
+                # fallback: self-select by OKS
                 min_oks_values, min_indices = oks_per_symmetry.min(dim=1)  # [M]
 
             selected_l1_values = l1_per_symmetry[batch_indices, min_indices]  # [M]
 
-            # === 4. Cross-ratio 계산 (픽셀 좌표) ===
+            # === 4. Compute cross-ratio (in pixel coordinates) ===
             selected_tgt_pix = tgt_pix[batch_indices, min_indices, :, :]  # [M,32,2]
-            pred_pix_cls = pred_pix[mask]  # [M,32,2] 픽셀
+            pred_pix_cls = pred_pix[mask]  # [M,32,2] pixels
 
             cr_losses = self.compute_cross_ratio_loss(
-                pred_pix_cls.unsqueeze(1),      # [M,1,32,2] 픽셀
-                selected_tgt_pix.unsqueeze(1),   # [M,1,32,2] 픽셀
+                pred_pix_cls.unsqueeze(1),      # [M,1,32,2] pixels
+                selected_tgt_pix.unsqueeze(1),   # [M,1,32,2] pixels
                 label_id
             )
 
-            # 5. 결과 저장
+            # 5. Store results
             per_inst_l1_losses.append(selected_l1_values)
             per_inst_oks_losses.append(min_oks_values)
             per_inst_cr_losses.append(cr_losses)
 
             # Pixel error for metric
             if compute_metrics:
-                diff_pix = pred_exp - tgt_pix  # [M,S,32,2] 픽셀 단위
+                diff_pix = pred_exp - tgt_pix  # [M,S,32,2] in pixel units
                 l1_pix_per_point = torch.abs(diff_pix).sum(dim=-1)  # [M,S,32]
                 l1_pix_per_symmetry = l1_pix_per_point.mean(dim=-1)  # [M,S]
                 selected_pix_error = l1_pix_per_symmetry[batch_indices, min_indices]  # [M]
                 per_inst_kpt_pix_errors.append(selected_pix_error)
 
-        # 최종 loss 계산
+        # Compute final loss
         if len(per_inst_l1_losses) > 0:
             per_inst_l1_losses = torch.cat(per_inst_l1_losses, dim=0)
             loss_keypoints = per_inst_l1_losses.sum() / max(num_boxes, 1.0)
@@ -435,12 +436,12 @@ class RACE6DCriterion_addr(nn.Module):
 
     def compute_cross_ratio_loss(self, pred_keypoints, target_keypoints, label_id):
         """
-        완전히 벡터화된 Cross-ratio loss (픽셀 좌표)
+        Fully vectorized cross-ratio loss (in pixel coordinates).
         
         Args:
-            pred_keypoints: [M, 1, 32, 2] - 픽셀 좌표
-            target_keypoints: [M, 1, 32, 2] - 픽셀 좌표
-            label_id: 리맵된 레이블 ID
+            pred_keypoints: [M, 1, 32, 2] - pixel coordinates
+            target_keypoints: [M, 1, 32, 2] - pixel coordinates
+            label_id: remapped label ID
         """
         M = pred_keypoints.shape[0]
         device = pred_keypoints.device
@@ -459,18 +460,18 @@ class RACE6DCriterion_addr(nn.Module):
         if num_edges == 0:
             return torch.zeros(M, device=device)
 
-        # ===== 벡터화: 모든 edge를 한 번에 처리 =====
+        # ===== Vectorized: process all edges at once =====
         edges_tensor = torch.tensor(edges, dtype=torch.long, device=device)  # [num_edges, 4]
         
-        # Squeeze + FP32 강제 (AMP FP16에서 epsilon underflow 방지)
+        # Squeeze + force FP32 (avoid epsilon underflow under AMP FP16)
         pred_kpts = pred_keypoints.squeeze(1).float()  # [M, 32, 2]
         tgt_kpts = target_keypoints.squeeze(1).float()  # [M, 32, 2]
         
-        # 모든 edge의 4개 점을 한 번에 인덱싱: [M, num_edges, 4, 2]
+        # Index all four points of every edge at once: [M, num_edges, 4, 2]
         pred_points = pred_kpts[:, edges_tensor]
         tgt_points = tgt_kpts[:, edges_tensor]
         
-        # 4개 점 분리: A, B, C, D
+        # Split into 4 points: A, B, C, D
         pred_A = pred_points[:, :, 0]  # [M, num_edges, 2]
         pred_B = pred_points[:, :, 1]
         pred_C = pred_points[:, :, 2]
@@ -481,7 +482,7 @@ class RACE6DCriterion_addr(nn.Module):
         tgt_C = tgt_points[:, :, 2]
         tgt_D = tgt_points[:, :, 3]
         
-        # Cross-ratio 계산 (벡터화) - 모든 edge 사용
+        # Cross-ratio computation (vectorized) - use all edges
         pred_CA = torch.norm(pred_C - pred_A, dim=-1)
         pred_DB = torch.norm(pred_D - pred_B, dim=-1)
         pred_CB = torch.norm(pred_C - pred_B, dim=-1)
@@ -497,10 +498,10 @@ class RACE6DCriterion_addr(nn.Module):
         tgt_denominator = tgt_CB * tgt_DA + 1e-8
         tgt_cr = (tgt_CA * tgt_DB) / tgt_denominator
         
-        # SmoothL1 loss - 모든 edge 사용
+        # SmoothL1 loss - use all edges
         smooth_l1 = F.smooth_l1_loss(pred_cr, tgt_cr, reduction='none', beta=0.1)
         
-        # 각 인스턴스별 평균
+        # Average per instance
         loss_per_instance = smooth_l1.mean(dim=1)
         
         return loss_per_instance
@@ -508,9 +509,9 @@ class RACE6DCriterion_addr(nn.Module):
     def _c2t_pred(self, translation, cam_K, bbox_info, img_w, img_h):
         """Convert bbox-relative (rx, ry, log_tz) to 3D translation (mm).
         translation: [N, 3] or [3]  — (rx, ry, log_tz)  bbox-relative offset
-        cam_K: [3, 3] or [N, 3, 3] camera intrinsics (per-instance 지원)
+        cam_K: [3, 3] or [N, 3, 3] camera intrinsics (per-instance supported)
         bbox_info: [N, 4] normalized [cx, cy, w, h]
-        img_w, img_h: 원본 이미지 크기 (caller가 반드시 전달, cam_K 기준과 일치해야 함)
+        img_w, img_h: original image size (caller must pass it; must match the cam_K reference frame)
         """
 
         if translation.dim() == 1:
@@ -574,8 +575,8 @@ class RACE6DCriterion_addr(nn.Module):
         return result
 
     def _bbox_relative_to_pixel(self, keypoints_relative, bbox_info, img_w, img_h):
-        """Bbox 중심 상대 좌표를 픽셀 절대 좌표로 변환.
-        keypoints_relative: [N, K, 2] bbox-relative (w,h로 정규화된 offset)
+        """Convert bbox-center-relative coordinates to absolute pixel coordinates.
+        keypoints_relative: [N, K, 2] bbox-relative (offset normalized by w, h)
         bbox_info: [N, 4] normalized [cx, cy, w, h]
         Returns: [N, K, 2] pixel coords
         """
@@ -605,9 +606,9 @@ class RACE6DCriterion_addr(nn.Module):
 
     def loss_addr(self, outputs, targets, indices, num_boxes, compute_metrics=True):
         """
-        ADD / ADD-R loss (m 단위, REF6D 방식)
-        - 비대칭: ADD loss
-        - 대칭: ADD-R loss
+        ADD / ADD-R loss (in meters, REF6D style)
+        - Asymmetric: ADD loss
+        - Symmetric: ADD-R loss
         """
         assert 'pred_rotations' in outputs
         assert 'pred_translations' in outputs
@@ -656,7 +657,7 @@ class RACE6DCriterion_addr(nn.Module):
 
         all_losses = []
         all_rot_errors = []
-        # per-instance best symmetry index 수집 (keypoint loss와 공유)
+        # Collect per-instance best symmetry index (shared with keypoint loss)
         all_sym_indices = torch.zeros(len(target_classes), dtype=torch.long, device=self.device)
 
         for cls_id in torch.unique(target_classes):
@@ -707,7 +708,7 @@ class RACE6DCriterion_addr(nn.Module):
                     rot_error = self._compute_symmetric_rotation_error(cls_R_pred, cls_R_gt, sym_Rs)
                 all_rot_errors.append(rot_error)
 
-        # keypoint loss에서 사용할 수 있도록 캐싱
+        # Cache so keypoint loss can reuse it
         self._cached_sym_indices = all_sym_indices
 
         if len(all_losses) == 0:
@@ -736,7 +737,7 @@ class RACE6DCriterion_addr(nn.Module):
     
     def _compute_add_loss(self, R_pred, t_pred, R_gt, t_gt, model_points):
         """
-        비대칭 객체용 ADD loss
+        ADD loss for asymmetric objects.
 
         Args:
             R_pred: [M, 3, 3]
@@ -747,7 +748,7 @@ class RACE6DCriterion_addr(nn.Module):
 
         Returns:
             losses: [M] — ADD distance
-            best_sym_idx: [M] — 항상 0 (비대칭이므로 대칭 index 없음)
+            best_sym_idx: [M] - always 0 (no symmetry index for asymmetric objects)
         """
         points_pred = torch.matmul(
             R_pred, model_points.T
@@ -764,7 +765,7 @@ class RACE6DCriterion_addr(nn.Module):
 
     def _compute_addr_loss(self, R_pred, t_pred, R_gt, t_gt, sym_Rs, model_points):
         """
-        대칭 객체용 ADD-R loss
+        ADD-R loss for symmetric objects.
 
         Args:
             R_pred: [M, 3, 3]
@@ -859,7 +860,7 @@ class RACE6DCriterion_addr(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
-        # sym index 캐시 초기화 (pose → keypoint 순서로 호출 시 공유)
+        # Reset symmetry index cache (shared when called in pose -> keypoint order)
         self._cached_sym_indices = None
 
         outputs_without_aux = {k: v for k, v in outputs.items() if 'aux' not in k}
@@ -889,8 +890,8 @@ class RACE6DCriterion_addr(nn.Module):
             losses.update(l_dict_weighted)
 
         # Auxiliary losses
-        # - share_matched_indices=True  : main indices 재사용
-        # - share_matched_indices=False : layer 마다 새 매칭
+        # - share_matched_indices=True  : reuse main indices
+        # - share_matched_indices=False : compute new matching per layer
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 if self.share_matched_indices:
@@ -915,7 +916,7 @@ class RACE6DCriterion_addr(nn.Module):
                     losses.update(l_dict_kept)
 
         # Encoder auxiliary losses
-        # enc 는 항상 자체 매칭 필요 (main decoder 와 다른 branch)
+        # enc always needs its own matching (different branch from the main decoder)
         if 'enc_aux_outputs' in outputs:
             assert 'enc_meta' in outputs, ''
             class_agnostic = outputs['enc_meta']['class_agnostic']
@@ -953,7 +954,7 @@ class RACE6DCriterion_addr(nn.Module):
         if 'dn_aux_outputs' in outputs and 'dn_meta' in outputs:
             dn_meta = outputs['dn_meta']
             indices = self.get_cdn_matched_indices(dn_meta, targets)
-            # DN은 자체 정규화 필요 → raw GT count 재계산
+            # DN needs its own normalization -> recompute raw GT count
             raw_num_boxes = sum(len(t["labels"]) for t in targets)
             raw_num_boxes = torch.as_tensor([raw_num_boxes], dtype=torch.float, device=self.device)
             if is_dist_available_and_initialized():
@@ -961,7 +962,7 @@ class RACE6DCriterion_addr(nn.Module):
             raw_num_boxes = torch.clamp(raw_num_boxes / get_world_size(), min=1).item()
             dn_num_boxes = raw_num_boxes * dn_meta['dn_num_group']
 
-            # cls + bbox losses만 (pose, keypoint 제외)
+            # cls + bbox losses only (excludes pose, keypoint)
             dn_losses = [l for l in self.losses if l in ('vfl', 'mal', 'boxes')]
 
             for i, aux_outputs in enumerate(outputs['dn_aux_outputs']):
@@ -996,7 +997,7 @@ class RACE6DCriterion_addr(nn.Module):
         # Default values for score target (VFL/MAL): IoU only
         values = iou
 
-        # Pose-aware score target: values = ADD-R based pose_quality (bbox 배제)
+        # Pose-aware score target: values = ADD-R based pose_quality (bbox excluded)
         if self.boxes_weight_format == 'iou_pose' and self._has_pose_info_available():
             with torch.no_grad():
                 values = self._compute_pose_quality(outputs, targets, indices)  # [M] in [0,1]
@@ -1070,7 +1071,7 @@ class RACE6DCriterion_addr(nn.Module):
 
     @staticmethod
     def get_cdn_matched_indices(dn_meta, targets):
-        """CDN denoising의 positive query와 GT를 매칭."""
+        """Match positive queries and GT for CDN denoising."""
         dn_positive_idx = dn_meta["dn_positive_idx"]
         dn_num_group = dn_meta["dn_num_group"]
         num_gts = [len(t['labels']) for t in targets]

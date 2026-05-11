@@ -24,14 +24,14 @@ LambdaLR = register()(lr_scheduler.LambdaLR)
 
 
 def _flat_cosine_schedule(total_iter, warmup_iter, flat_iter, no_aug_iter, current_iter, init_lr, min_lr):
-    """4-phase LR schedule (iter 기반).
+    """4-phase LR schedule (iteration-based).
     Phase 1: Warmup (quadratic, 0 → init_lr)
-    Phase 2: Flat (init_lr 유지)
-    Phase 3: Cosine decay (init_lr → min_lr, 완전 완료)
-    Phase 4: No-aug (min_lr 고정)
+    Phase 2: Flat (maintain init_lr)
+    Phase 3: Cosine decay (init_lr → min_lr, fully complete)
+    Phase 4: No-aug (fixed at min_lr)
 
-    총 학습 = T_max epochs, no_aug는 T_max 내 마지막 구간.
-    cosine은 flat 끝 → (T_max - no_aug) 구간에서 min_lr까지 완전 감소.
+    Total training = T_max epochs; no_aug is the final segment within T_max.
+    Cosine decays fully from end of flat phase → (T_max - no_aug) interval down to min_lr.
     """
     cosine_end = total_iter - no_aug_iter
     if current_iter <= warmup_iter:
@@ -49,20 +49,20 @@ def _flat_cosine_schedule(total_iter, warmup_iter, flat_iter, no_aug_iter, curre
 
 @register()
 class FlatCosineAnnealingLR:
-    """FlatCosineLRScheduler (iter 기반, warmup 포함).
+    """FlatCosineLRScheduler (iteration-based, with warmup).
 
-    Registry에서 생성 시 iter_per_epoch를 모르므로, solver에서
-    dataloader 생성 후 init_schedule(iter_per_epoch)를 호출해야 함.
+    iter_per_epoch is unknown at registry creation time, so the solver must call
+    init_schedule(iter_per_epoch) after the dataloader is created.
 
     Args:
         optimizer: optimizer instance
-        lr_gamma: min_lr = base_lr * lr_gamma (기본: 0.5)
-        T_max: 전체 학습 epoch 수
-        warmup_iter: warmup iteration 수 (기본: 2000)
-        flat_epochs: flat phase epoch 수
-        no_aug_epochs: no-aug phase epoch 수
-        group_flat_epochs: dict {group_idx: flat_epochs} — group별 flat phase 커스텀
-            예: {0: 0, 1: 0} → group 0,1은 flat 없이 바로 cosine 감소
+        lr_gamma: min_lr = base_lr * lr_gamma (default: 0.5)
+        T_max: total number of training epochs
+        warmup_iter: number of warmup iterations (default: 2000)
+        flat_epochs: number of flat phase epochs
+        no_aug_epochs: number of no-aug phase epochs
+        group_flat_epochs: dict {group_idx: flat_epochs} — per-group flat phase customization
+            e.g.: {0: 0, 1: 0} → groups 0 and 1 skip flat phase and go straight to cosine decay
     """
     def __init__(self, optimizer, lr_gamma=0.5, T_max=40,
                  warmup_iter=2000, flat_epochs=5, no_aug_epochs=8,
@@ -78,7 +78,7 @@ class FlatCosineAnnealingLR:
         self._iter_based = True
 
     def init_schedule(self, iter_per_epoch):
-        """Dataloader 생성 후 호출. iter_per_epoch로 실제 schedule 계산."""
+        """Called after dataloader is created. Computes the actual schedule from iter_per_epoch."""
         from functools import partial
         total_iter = int(iter_per_epoch * self.T_max)
         no_aug_iter = int(iter_per_epoch * self.no_aug_epochs)
@@ -91,7 +91,7 @@ class FlatCosineAnnealingLR:
                 _flat_cosine_schedule, total_iter, self.warmup_iter, flat_iter, no_aug_iter))
 
     def step(self, current_iter, optimizer):
-        """매 iteration 호출. optimizer의 LR을 업데이트."""
+        """Called every iteration. Updates the optimizer LR."""
         if self.lr_funcs is None:
             return
         for i, group in enumerate(optimizer.param_groups):

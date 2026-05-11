@@ -37,7 +37,7 @@ class PoseSolver(BaseSolver):
 
             self.criterion.update_epoch(epoch)
 
-            # iter 기반 scheduler면 engine에 전달, 아니면 기존 warmup 방식
+            # If iter-based scheduler, pass to engine; otherwise use legacy warmup
             _iter_based = getattr(self.lr_scheduler, '_iter_based', False)
             train_stats = train_one_epoch(
                 self.model,

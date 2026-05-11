@@ -51,7 +51,7 @@ RACE6DTransformer_DQE:
   vis_enc: True
   activation: silu
   mlp_act: silu
-  num_denoising: 0      # DN query 수 (0이면 비활성)
+  num_denoising: 0      # number of DN queries (0 = disabled)
   label_noise_ratio: 0.5
   box_noise_scale: 1.0
 

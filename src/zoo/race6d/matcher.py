@@ -198,7 +198,7 @@ class HungarianMatcher(torch.nn.Module):
             rows = row_indices[i][valid_mask]
             cols = col_indices[i][valid_mask]
 
-            # indices: 필터 없음 (cls/bbox bootstrap용 — VFL이 IoU=0 자동 처리)
+            # indices: no filter (for cls/bbox bootstrap — VFL handles IoU=0 automatically)
             all_indices.append((rows, cols))
 
         return {'indices': all_indices}

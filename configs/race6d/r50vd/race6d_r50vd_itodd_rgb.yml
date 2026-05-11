@@ -59,7 +59,7 @@ RACE6DCriterion_addr:
   alpha: 0.75
   gamma_pos: 1.5
   gamma_neg: 2.0
-  compute_aux_metrics: False  # ITODD: aux/enc layer의 metric 계산 skip (학습 가속, main metric은 그대로 로깅)
+  compute_aux_metrics: False  # ITODD: skip metric computation for aux/enc layers (speeds up training; main metric still logged)
 
   matcher:
     type: HungarianMatcher
