@@ -1,7 +1,7 @@
 """
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 ---------------------------------------------------------------------
-Copyright(c) 2025 Anonymous. All Rights Reserved.
+Copyright(c) 2026 Yoonwoo-Ha. All Rights Reserved.
 """
 
 import torch
@@ -17,7 +17,7 @@ import torchvision.transforms.v2 as T
 
 from typing import Any, Dict, List, Optional
 
-from ._transforms import EmptyTransform, RandomSelect, Image, BoundingBoxes, Mask, Pose
+from ._transforms import EmptyTransform, Image, BoundingBoxes, Mask, Pose
 from ...core import register, GLOBAL_CONFIG
 
 
@@ -126,14 +126,11 @@ class Compose(T.Compose):
     # so cloning before/after them is pure overhead (~40ms/sample with 20 transforms).
     _SPATIAL_TRANSFORMS = frozenset(
         {
-            "CopyPaste",
-            "ZoomPoseAugmentation",
-            "RandomTransformAug",
+            "CopyPasteSingleClass",
+            "PoseAugmentation",
             "RandomCoarseDropout",
             "RandomObjectOcclusion",
-            "RandomSelect",
             "Mosaic",
-            "CopyPaste",
             "RandomRotateExpand",
         }
     )
@@ -141,8 +138,6 @@ class Compose(T.Compose):
     def stop_epoch_forward(self, *inputs: Any):
         sample = inputs if len(inputs) > 1 else inputs[0]
         _, _, dataset = sample
-        aux_idx = np.random.randint(0, len(dataset))
-        aux_img, aux_target = dataset.load_item(aux_idx)
 
         cur_epoch = dataset.epoch
         policy_ops = self.policy["ops"]
@@ -168,13 +163,7 @@ class Compose(T.Compose):
                     prev_image, prev_target = self.clone_image_target(sample)
                     prev_sample = (prev_image, prev_target, dataset)
 
-                if isinstance(transform, (RandomSelect)):
-                    if aux_img is not None and aux_target is not None:
-                        sample = transform((sample, aux_img, aux_target))
-                    else:
-                        pass
-                else:
-                    sample = transform(sample)
+                sample = transform(sample)
 
                 if needs_guard:
                     target = sample[1]

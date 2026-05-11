@@ -37,6 +37,7 @@ class RACE6DCriterion_addr(nn.Module):
         share_matched_indices=False,
         enc_weight_dict=None,
         pose_quality_scale=0.2,
+        compute_aux_metrics=True,
         **kwargs):
         """
         Parameters:
@@ -57,6 +58,7 @@ class RACE6DCriterion_addr(nn.Module):
         #   values = ADD-R/diameter based pose_quality in [0, 1] (bbox IoU 미반영)
         self.pose_quality_scale = float(pose_quality_scale)
         self.share_matched_indices = share_matched_indices
+        self.compute_aux_metrics = bool(compute_aux_metrics)
         self.alpha = alpha
         self.gamma = gamma
         # MAL/VFL용: positive target은 gamma_pos, negative weight는 gamma_neg
@@ -134,7 +136,7 @@ class RACE6DCriterion_addr(nn.Module):
 
         return 'asymmetric'
     
-    def loss_labels_vfl(self, outputs, targets, indices, num_boxes, values=None):
+    def loss_labels_vfl(self, outputs, targets, indices, num_boxes, values=None, compute_metrics=True):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         if values is None:
@@ -165,12 +167,14 @@ class RACE6DCriterion_addr(nn.Module):
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
 
-        pred_classes = src_logits[idx].argmax(dim=-1)
-        cls_error = (pred_classes != target_classes_o).float().mean() if len(target_classes_o) > 0 else torch.tensor(0.0, device=self.device)
+        result = {'loss_vfl': loss}
+        if compute_metrics:
+            pred_classes = src_logits[idx].argmax(dim=-1)
+            cls_error = (pred_classes != target_classes_o).float().mean() if len(target_classes_o) > 0 else torch.tensor(0.0, device=self.device)
+            result['metric_cls_error'] = cls_error
+        return result
 
-        return {'loss_vfl': loss, 'metric_cls_error': cls_error}
-
-    def loss_labels_mal(self, outputs, targets, indices, num_boxes, values=None):
+    def loss_labels_mal(self, outputs, targets, indices, num_boxes, values=None, compute_metrics=True):
         """Matchability-Aware Loss (MAL) with IoU score target."""
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
@@ -199,12 +203,14 @@ class RACE6DCriterion_addr(nn.Module):
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
 
-        pred_classes = src_logits[idx].argmax(dim=-1)
-        cls_error = (pred_classes != target_classes_o).float().mean() if len(target_classes_o) > 0 else torch.tensor(0.0, device=self.device)
+        result = {'loss_mal': loss}
+        if compute_metrics:
+            pred_classes = src_logits[idx].argmax(dim=-1)
+            cls_error = (pred_classes != target_classes_o).float().mean() if len(target_classes_o) > 0 else torch.tensor(0.0, device=self.device)
+            result['metric_cls_error'] = cls_error
+        return result
 
-        return {'loss_mal': loss, 'metric_cls_error': cls_error}
-
-    def loss_boxes(self, outputs, targets, indices, num_boxes, boxes_weight=None):
+    def loss_boxes(self, outputs, targets, indices, num_boxes, boxes_weight=None, compute_metrics=True):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
@@ -223,23 +229,24 @@ class RACE6DCriterion_addr(nn.Module):
         loss_giou = loss_giou if boxes_weight is None else loss_giou * boxes_weight
         losses['loss_giou'] = loss_giou.sum() / num_boxes
 
-        # Per-component bbox error in pixels (orig_size 기준)
-        orig_w, orig_h = self._get_orig_size(targets)
-        if len(src_boxes) > 0:
-            diff = (src_boxes - target_boxes).abs()
-            losses['metric_bbox_cx_error'] = (diff[:, 0].mean() * orig_w).detach()
-            losses['metric_bbox_cy_error'] = (diff[:, 1].mean() * orig_h).detach()
-            losses['metric_bbox_w_error'] = (diff[:, 2].mean() * orig_w).detach()
-            losses['metric_bbox_h_error'] = (diff[:, 3].mean() * orig_h).detach()
-        else:
-            zero = torch.tensor(0.0, device=src_boxes.device)
-            losses['metric_bbox_cx_error'] = zero
-            losses['metric_bbox_cy_error'] = zero
-            losses['metric_bbox_w_error'] = zero
-            losses['metric_bbox_h_error'] = zero
+        if compute_metrics:
+            # Per-component bbox error in pixels (orig_size 기준)
+            orig_w, orig_h = self._get_orig_size(targets)
+            if len(src_boxes) > 0:
+                diff = (src_boxes - target_boxes).abs()
+                losses['metric_bbox_cx_error'] = (diff[:, 0].mean() * orig_w).detach()
+                losses['metric_bbox_cy_error'] = (diff[:, 1].mean() * orig_h).detach()
+                losses['metric_bbox_w_error'] = (diff[:, 2].mean() * orig_w).detach()
+                losses['metric_bbox_h_error'] = (diff[:, 3].mean() * orig_h).detach()
+            else:
+                zero = torch.tensor(0.0, device=src_boxes.device)
+                losses['metric_bbox_cx_error'] = zero
+                losses['metric_bbox_cy_error'] = zero
+                losses['metric_bbox_w_error'] = zero
+                losses['metric_bbox_h_error'] = zero
         return losses
     
-    def loss_keypoints(self, outputs, targets, indices, num_boxes):
+    def loss_keypoints(self, outputs, targets, indices, num_boxes, compute_metrics=True):
         assert 'pred_keypoints' in outputs
         device = self.device
         img_w, img_h = self._get_orig_size(targets)
@@ -254,12 +261,14 @@ class RACE6DCriterion_addr(nn.Module):
 
         N = src_kpts.shape[0]
         if N == 0:
-            return {
+            empty = {
                 'loss_keypoints': torch.tensor(0.0, device=device, requires_grad=True),
                 'loss_cr': torch.tensor(0.0, device=device, requires_grad=True),
                 'loss_oks': torch.tensor(0.0, device=device, requires_grad=True),
-                'metric_kpt_error': torch.tensor(0.0, device=device),
             }
+            if compute_metrics:
+                empty['metric_kpt_error'] = torch.tensor(0.0, device=device)
+            return empty
 
         # GT 데이터 수집
         target_poses  = torch.cat([t['poses'][j]  for t, (_, j) in zip(targets, indices)], dim=0)  # [N,12]
@@ -385,11 +394,12 @@ class RACE6DCriterion_addr(nn.Module):
             per_inst_cr_losses.append(cr_losses)
 
             # Pixel error for metric
-            diff_pix = pred_exp - tgt_pix  # [M,S,32,2] 픽셀 단위
-            l1_pix_per_point = torch.abs(diff_pix).sum(dim=-1)  # [M,S,32]
-            l1_pix_per_symmetry = l1_pix_per_point.mean(dim=-1)  # [M,S]
-            selected_pix_error = l1_pix_per_symmetry[batch_indices, min_indices]  # [M]
-            per_inst_kpt_pix_errors.append(selected_pix_error)
+            if compute_metrics:
+                diff_pix = pred_exp - tgt_pix  # [M,S,32,2] 픽셀 단위
+                l1_pix_per_point = torch.abs(diff_pix).sum(dim=-1)  # [M,S,32]
+                l1_pix_per_symmetry = l1_pix_per_point.mean(dim=-1)  # [M,S]
+                selected_pix_error = l1_pix_per_symmetry[batch_indices, min_indices]  # [M]
+                per_inst_kpt_pix_errors.append(selected_pix_error)
 
         # 최종 loss 계산
         if len(per_inst_l1_losses) > 0:
@@ -410,18 +420,18 @@ class RACE6DCriterion_addr(nn.Module):
         else:
             loss_cr = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Keypoint error in pixels (metric)
-        if len(per_inst_kpt_pix_errors) > 0:
-            kpt_error = torch.cat(per_inst_kpt_pix_errors).mean()
-        else:
-            kpt_error = torch.tensor(0.0, device=device)
-
-        return {
+        result = {
             'loss_keypoints': loss_keypoints,
             'loss_oks': loss_oks,
             'loss_cr': loss_cr,
-            'metric_kpt_error': kpt_error.detach(),
         }
+        if compute_metrics:
+            if len(per_inst_kpt_pix_errors) > 0:
+                kpt_error = torch.cat(per_inst_kpt_pix_errors).mean()
+            else:
+                kpt_error = torch.tensor(0.0, device=device)
+            result['metric_kpt_error'] = kpt_error.detach()
+        return result
 
     def compute_cross_ratio_loss(self, pred_keypoints, target_keypoints, label_id):
         """
@@ -445,10 +455,10 @@ class RACE6DCriterion_addr(nn.Module):
         
         edges = self.edges_mask[edges_key]
         num_edges = len(edges)
-        
+
         if num_edges == 0:
             return torch.zeros(M, device=device)
-        
+
         # ===== 벡터화: 모든 edge를 한 번에 처리 =====
         edges_tensor = torch.tensor(edges, dtype=torch.long, device=device)  # [num_edges, 4]
         
@@ -593,7 +603,7 @@ class RACE6DCriterion_addr(nn.Module):
 
         return result
 
-    def loss_addr(self, outputs, targets, indices, num_boxes):
+    def loss_addr(self, outputs, targets, indices, num_boxes, compute_metrics=True):
         """
         ADD / ADD-R loss (m 단위, REF6D 방식)
         - 비대칭: ADD loss
@@ -616,12 +626,14 @@ class RACE6DCriterion_addr(nn.Module):
         # with strict iou_threshold, or degenerate batches).
         if len(target_classes) == 0:
             zero = torch.tensor(0.0, device=self.device, requires_grad=True)
-            zero_m = torch.tensor(0.0, device=self.device)
-            return {
-                'loss_pose': zero,
-                'metric_tx_error': zero_m, 'metric_ty_error': zero_m,
-                'metric_tz_error': zero_m, 'metric_rot_error': zero_m,
-            }
+            empty = {'loss_pose': zero}
+            if compute_metrics:
+                zero_m = torch.tensor(0.0, device=self.device)
+                empty.update({
+                    'metric_tx_error': zero_m, 'metric_ty_error': zero_m,
+                    'metric_tz_error': zero_m, 'metric_rot_error': zero_m,
+                })
+            return empty
 
         target_rotations = target_poses[:, 3:].reshape(-1, 3, 3)
 
@@ -637,9 +649,10 @@ class RACE6DCriterion_addr(nn.Module):
         src_boxes = outputs['pred_boxes'][idx].detach()
         src_translations = self._c2t_pred(outputs['pred_translations'][idx], cam_K, src_boxes, orig_w, orig_h) / 1000.0  # mm → m
 
-        tx_error_mm = (src_translations[:, 0] - target_translations[:, 0]).abs().mean() * 1000.0
-        ty_error_mm = (src_translations[:, 1] - target_translations[:, 1]).abs().mean() * 1000.0
-        tz_error_mm = (src_translations[:, 2] - target_translations[:, 2]).abs().mean() * 1000.0
+        if compute_metrics:
+            tx_error_mm = (src_translations[:, 0] - target_translations[:, 0]).abs().mean() * 1000.0
+            ty_error_mm = (src_translations[:, 1] - target_translations[:, 1]).abs().mean() * 1000.0
+            tz_error_mm = (src_translations[:, 2] - target_translations[:, 2]).abs().mean() * 1000.0
 
         all_losses = []
         all_rot_errors = []
@@ -687,34 +700,39 @@ class RACE6DCriterion_addr(nn.Module):
             all_losses.append(loss)
             all_sym_indices[cls_mask] = best_sym_idx
 
-            if symmetry_type == 'asymmetric':
-                rot_error = self._compute_rotation_error(cls_R_pred, cls_R_gt)
-            else:
-                rot_error = self._compute_symmetric_rotation_error(cls_R_pred, cls_R_gt, sym_Rs)
-            all_rot_errors.append(rot_error)
+            if compute_metrics:
+                if symmetry_type == 'asymmetric':
+                    rot_error = self._compute_rotation_error(cls_R_pred, cls_R_gt)
+                else:
+                    rot_error = self._compute_symmetric_rotation_error(cls_R_pred, cls_R_gt, sym_Rs)
+                all_rot_errors.append(rot_error)
 
         # keypoint loss에서 사용할 수 있도록 캐싱
         self._cached_sym_indices = all_sym_indices
 
         if len(all_losses) == 0:
-            return {
-                'loss_pose': torch.tensor(0.0, device=self.device, requires_grad=True),
+            empty = {'loss_pose': torch.tensor(0.0, device=self.device, requires_grad=True)}
+            if compute_metrics:
+                empty.update({
+                    'metric_tx_error': tx_error_mm.detach(),
+                    'metric_ty_error': ty_error_mm.detach(),
+                    'metric_tz_error': tz_error_mm.detach(),
+                    'metric_rot_error': torch.tensor(0.0, device=self.device),
+                })
+            return empty
+
+        final_loss = torch.cat(all_losses, dim=0).sum() / max(num_boxes, 1.0)
+
+        result = {'loss_pose': final_loss}
+        if compute_metrics:
+            rot_error_deg = torch.cat(all_rot_errors, dim=0).mean() if len(all_rot_errors) > 0 else torch.tensor(0.0, device=self.device)
+            result.update({
                 'metric_tx_error': tx_error_mm.detach(),
                 'metric_ty_error': ty_error_mm.detach(),
                 'metric_tz_error': tz_error_mm.detach(),
-                'metric_rot_error': torch.tensor(0.0, device=self.device),
-            }
-
-        final_loss = torch.cat(all_losses, dim=0).sum() / max(num_boxes, 1.0)
-        rot_error_deg = torch.cat(all_rot_errors, dim=0).mean()
-
-        return {
-            'loss_pose': final_loss,
-            'metric_tx_error': tx_error_mm.detach(),
-            'metric_ty_error': ty_error_mm.detach(),
-            'metric_tz_error': tz_error_mm.detach(),
-            'metric_rot_error': rot_error_deg.detach(),
-        }
+                'metric_rot_error': rot_error_deg.detach(),
+            })
+        return result
     
     def _compute_add_loss(self, R_pred, t_pred, R_gt, t_gt, model_points):
         """
@@ -822,7 +840,7 @@ class RACE6DCriterion_addr(nn.Module):
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
-    def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
+    def get_loss(self, loss, outputs, targets, indices, num_boxes, compute_metrics=True, **kwargs):
         loss_map = {
             'boxes': self.loss_boxes,
             'vfl': self.loss_labels_vfl,
@@ -831,7 +849,8 @@ class RACE6DCriterion_addr(nn.Module):
             'keypoint': self.loss_keypoints,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
+        return loss_map[loss](outputs, targets, indices, num_boxes,
+                              compute_metrics=compute_metrics, **kwargs)
     
     def forward(self, outputs, targets, **kwargs):
         """ This performs the loss computation.
@@ -884,7 +903,8 @@ class RACE6DCriterion_addr(nn.Module):
                 for loss in self.losses:
                     idx_use, nb_use = indices_aux, num_boxes_aux
                     meta = self.get_loss_meta_info(loss, aux_outputs, targets, idx_use)
-                    l_dict = self.get_loss(loss, aux_outputs, targets, idx_use, nb_use, **meta)
+                    l_dict = self.get_loss(loss, aux_outputs, targets, idx_use, nb_use,
+                                           compute_metrics=self.compute_aux_metrics, **meta)
                     l_dict_kept = {}
                     for k in l_dict:
                         if k.startswith('metric_'):
@@ -915,7 +935,8 @@ class RACE6DCriterion_addr(nn.Module):
                 for loss in self.losses:
                     idx_use, nb_use = indices_enc, num_boxes_enc
                     meta = self.get_loss_meta_info(loss, aux_outputs, enc_targets, idx_use)
-                    l_dict = self.get_loss(loss, aux_outputs, enc_targets, idx_use, nb_use, **meta)
+                    l_dict = self.get_loss(loss, aux_outputs, enc_targets, idx_use, nb_use,
+                                           compute_metrics=self.compute_aux_metrics, **meta)
                     l_dict_kept = {}
                     for k in l_dict:
                         if k.startswith('metric_'):

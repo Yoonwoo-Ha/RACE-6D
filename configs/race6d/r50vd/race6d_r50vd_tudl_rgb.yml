@@ -122,6 +122,7 @@ train_dataloader:
             ops: [BackgroundReplacement, RandomCoarseDropout, ColorJitter, RandomHSVAdjust,
                   RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
         return_masks: True
+        return_full_masks: False
         remap_mscoco_category: True
         return_depth: False
         category_file: ./configs/race6d/include/tudl2coco_category.yml
@@ -134,8 +135,8 @@ train_dataloader:
           ops:
             # Real train tz 편중(p95=1079) → 넓은 범위 커버 위한 zoom-out.
             # policy.ops에는 넣지 않아 epoch 25+에서도 계속 유지.
-            - {type: ZoomPoseAugmentation, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
-            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1, coco_path: ~/Downloads/tudl/, category_file: ./configs/race6d/include/tudl2coco_category.yml, num_fps_points: 1000}
+            - {type: PoseAugmentation, per_instance: false, rotation_range: 0.0, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
+            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
             - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter} #ok
@@ -153,6 +154,7 @@ train_dataloader:
             ops: [BackgroundReplacement, RandomCoarseDropout, ColorJitter, RandomHSVAdjust,
                   RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
         return_masks: True
+        return_full_masks: True
         remap_mscoco_category: True
         return_depth: False
         category_file: ./configs/race6d/include/tudl2coco_category.yml
@@ -172,6 +174,7 @@ val_dataloader:
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
     return_masks: True
+    return_full_masks: False
     remap_mscoco_category: True
     return_depth: False
     category_file: ./configs/race6d/include/tudl2coco_category.yml

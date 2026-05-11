@@ -47,6 +47,8 @@ RACE6DTransformer_DQE:
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
+  r_min: 0.5
+  r_max: 2.0
 
 RACE6DPostProcessor:
   num_top_queries: 20
@@ -54,8 +56,8 @@ RACE6DPostProcessor:
   remap_mscoco_category: False
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
-  losses: ['mal', 'boxes', 'pose', 'keypoint']
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
+  losses: ['vfl', 'boxes', 'pose', 'keypoint']
   alpha: 0.75
   gamma_pos: 1.0
   gamma_neg: 2.0
@@ -69,32 +71,30 @@ RACE6DCriterion_addr:
 optimizer:
   type: AdamW
   params:
-    - 
-      params: '^(?=.*(?:norm|bn)).*$'
+    - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
-    -
-      params: '^(?=.*bbox_head).*$'
-      lr: 0.00002
-    -
-      params: '^(?=.*score_head).*$'
-      lr: 0.0001
+    - params: ^(?=.*score_head).*$
+      lr: 8.0e-05
+    - params: ^(?=.*bbox_head).*$
+      lr: 8.0e-05
+    - params: ^(?=.*dec_reg_head).*$
+      lr: 8.0e-05
+    - params: ^(?=.*enc_trans_head).*$
+      lr: 8.0e-05
       
   lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 40
+epoches: 50
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 40
+  T_max: 50
   lr_gamma: 0.5
   warmup_iter: 1000
   flat_epochs: 5
-  no_aug_epochs: 15
-  group_flat_epochs:
-    1: 0
-    # 2: 10
+  no_aug_epochs: 10
 
 train_dataloader:
   dataset:
@@ -103,6 +103,7 @@ train_dataloader:
     transforms:
       ops:
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
+        - {type: RandomISPSimulation, p: 0.7}
         - {type: RandomCoarseDropout}
         - {type: ColorJitter} #ok
         - {type: RandomHSVAdjust} #ok
@@ -115,9 +116,10 @@ train_dataloader:
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
       policy:
         name: stop_epoch
-        epoch: [0, 25]
+        epoch: [0, 99]
         ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
     return_masks: True
+    return_full_masks: False
     remap_mscoco_category: True
     return_depth: False
     category_file: ./configs/race6d/include/lmo2coco_category.yml
@@ -133,9 +135,11 @@ val_dataloader:
     ann_file: ~/Downloads/lmo/lmo2coco_test_eval_amodal/annotations/instances_val2017.json
     transforms:
       ops:
+        - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
     return_masks: True
+    return_full_masks: False
     remap_mscoco_category: True
     return_depth: False
     category_file: ./configs/race6d/include/lmo2coco_category.yml

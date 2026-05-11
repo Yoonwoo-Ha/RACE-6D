@@ -60,3 +60,10 @@ CLAUDE.md
 bop.py
 test.py
 run_bop_tless_rgbd.py
+
+# Experimental backbones / encoders (not part of main model)
+src/nn/backbone/dinov3_dpt.py
+src/nn/backbone/efficientvit.py
+src/nn/backbone/efficientnat.py
+src/zoo/race6d/hybrid_encoder_na.py
+configs/race6d/r50vd/race6d_efficientnat_hb_rgb.yml

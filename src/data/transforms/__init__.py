@@ -10,8 +10,11 @@ from ._transforms import (
     RandomGaussianNoise,
     RandomAdditionalNoise,
     RandomCoarseDropout,
+    RandomISPSimulation,
+    PerClassColorDiversification,
     RandomObjectOcclusion,
 )
 from .container import Compose
 from .mosaic import Mosaic
-from ._transforms import CopyPaste
+from ._transforms import FillSingleClass
+from ._transforms import PoseAugmentation

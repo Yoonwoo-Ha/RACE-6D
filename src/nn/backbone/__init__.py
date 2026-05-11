@@ -15,5 +15,3 @@ from .test_resnet import MResNet
 from .timm_model import TimmModel
 from .torchvision_model import TorchVisionModel
 from .timm_backbone import TimmBackbone
-from .efficientvit import EfficientViT
-from .efficientnat import EfficientNAT

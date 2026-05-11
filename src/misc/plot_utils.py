@@ -239,6 +239,9 @@ def plot_logs(
 
                         if best_val is not None:
                             best_idx = valid_test[valid_test == best_val].index[-1]
+                            last_idx = valid_test.index[-1]
+                            last_val = valid_test.iloc[-1]
+                            best_above = last_idx == best_idx or best_val >= last_val
 
                             axs[j].axhline(
                                 y=best_val, color=line_color,
@@ -249,14 +252,35 @@ def plot_logs(
                             axs[j].annotate(
                                 f"{best_val:.4f} (ep {best_idx})",
                                 xy=(0, best_val),
-                                xytext=(0.02, best_val + offset),
+                                xytext=(0.02, best_val + (offset if best_above else -offset)),
                                 textcoords=("axes fraction", "data"),
-                                fontsize=10, va="bottom", ha="left",
+                                fontsize=10,
+                                va="bottom" if best_above else "top",
+                                ha="left",
                                 bbox=dict(
                                     boxstyle="round,pad=0.2",
                                     fc=box_color, ec=line_color, alpha=0.8,
                                 ),
                             )
+
+                            if last_idx != best_idx:
+                                axs[j].axhline(
+                                    y=last_val, color="royalblue",
+                                    linestyle="--", alpha=0.7, linewidth=1.5,
+                                )
+                                axs[j].annotate(
+                                    f"last {last_val:.4f} (ep {last_idx})",
+                                    xy=(0, last_val),
+                                    xytext=(0.02, last_val + (-offset if best_above else offset)),
+                                    textcoords=("axes fraction", "data"),
+                                    fontsize=10,
+                                    va="top" if best_above else "bottom",
+                                    ha="left",
+                                    bbox=dict(
+                                        boxstyle="round,pad=0.2",
+                                        fc="lightskyblue", ec="royalblue", alpha=0.8,
+                                    ),
+                                )
 
     for ax, field in zip(axs, fields):
         handles, labels = ax.get_legend_handles_labels()
@@ -486,6 +510,9 @@ def plot_logs_2x(
 
                         if best_val is not None:
                             best_idx = valid_test[valid_test == best_val].index[-1]
+                            last_idx = valid_test.index[-1]
+                            last_val = valid_test.iloc[-1]
+                            best_above = last_idx == best_idx or best_val >= last_val
 
                             axs[j].axhline(
                                 y=best_val, color=line_color,
@@ -496,14 +523,35 @@ def plot_logs_2x(
                             axs[j].annotate(
                                 f"{best_val:.4f} (ep {best_idx})",
                                 xy=(0, best_val),
-                                xytext=(0.02, best_val + y_offset),
+                                xytext=(0.02, best_val + (y_offset if best_above else -y_offset)),
                                 textcoords=("axes fraction", "data"),
-                                fontsize=10, va="bottom", ha="left",
+                                fontsize=10,
+                                va="bottom" if best_above else "top",
+                                ha="left",
                                 bbox=dict(
                                     boxstyle="round,pad=0.2",
                                     fc=box_color, ec=line_color, alpha=0.8,
                                 ),
                             )
+
+                            if last_idx != best_idx:
+                                axs[j].axhline(
+                                    y=last_val, color="royalblue",
+                                    linestyle="--", alpha=0.7, linewidth=1.5,
+                                )
+                                axs[j].annotate(
+                                    f"last {last_val:.4f} (ep {last_idx})",
+                                    xy=(0, last_val),
+                                    xytext=(0.02, last_val + (-y_offset if best_above else y_offset)),
+                                    textcoords=("axes fraction", "data"),
+                                    fontsize=10,
+                                    va="top" if best_above else "bottom",
+                                    ha="left",
+                                    bbox=dict(
+                                        boxstyle="round,pad=0.2",
+                                        fc="lightskyblue", ec="royalblue", alpha=0.8,
+                                    ),
+                                )
 
     for ax, field in zip(axs, fields):
         handles, labels = ax.get_legend_handles_labels()

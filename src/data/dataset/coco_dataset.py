@@ -4,7 +4,7 @@ Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references
 -----------------------------------------------------------------------
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 -----------------------------------------------------------------------
-Copyright(c) 2025 Anonymous. All Rights Reserved.
+Copyright(c) 2026 Yoonwoo-Ha. All Rights Reserved.
 """
 
 import torch
@@ -20,6 +20,7 @@ from .._misc import convert_to_tv_tensor, Pose
 from ...core import register
 
 import numpy as np
+import cv2
 import copy
 import os
 import yaml
@@ -40,6 +41,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         ann_file,
         transforms,
         return_masks=False,
+        return_full_masks=True,  # geometric aug 없으면 False로 두면 amodal polygon decode skip
         remap_mscoco_category=False,
         return_depth=False,
         category_file=None,
@@ -53,6 +55,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         super(CocoDetection, self).__init__(self.img_folder, self.ann_file)
         self._transforms = transforms
         self.return_masks = return_masks
+        self.return_full_masks = return_full_masks
         self.remap_mscoco_category = remap_mscoco_category
         self.return_depth = return_depth
         self.depth_scale = depth_scale
@@ -86,7 +89,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
             self.mscoco_category2label = {}
             self.mscoco_label2category = {}
 
-        self.prepare = ConvertCocoPolysToMask(return_masks)
+        self.prepare = ConvertCocoPolysToMask(return_masks, return_full_masks)
 
         # BOP depth_scale: annotation 내 depth_scale 필드에서 읽기
         # PBR=0.1 (px*0.1=mm), Real=1.0 (px*1.0=mm)
@@ -99,6 +102,11 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
 
         # 유효한 이미지 필터링 (Paligned 변환 후)
         self._filter_valid_images()
+
+        # category_id -> [valid dataset_idx, ...] cache.
+        # _filter_valid_images 직후에 build해서 cache가 valid image만 포함하도록.
+        # ann-level filter (ignore=True / iscrowd=1)도 반영.
+        self._build_class_to_image_idx_cache()
 
         # img_folder 기반으로 depth_root 자동 결정
         self.depth_root = None
@@ -279,6 +287,41 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         print(f"  (after ignore/bbox/coordinate filters with Paligned transform)")
         print(f"Remaining images: {len(self.ids)}")
 
+    def _build_class_to_image_idx_cache(self):
+        """category_id -> [valid dataset_idx, ...] 매핑 cache.
+
+        _filter_valid_images 와 동일한 ann-level filter (ignore=False, iscrowd=0,
+        tz>0) 를 그대로 적용. 즉 cache 안의 image_idx는 해당 cat_id의 유효한
+        ann 이 최소 1개 보장. CopyPasteSingleClass 같은 same-class fetch 가
+        random retry 없이 O(1) lookup으로 동작하기 위함.
+        """
+        img_id_to_idx = {iid: i for i, iid in enumerate(self.ids)}
+        cat_to_idx = {cat_id: [] for cat_id in self.coco.getCatIds()}
+
+        for cat_id in list(cat_to_idx.keys()):
+            for iid in self.coco.getImgIds(catIds=[cat_id]):
+                if iid not in img_id_to_idx:
+                    continue
+                ann_ids = self.coco.getAnnIds(imgIds=iid, catIds=[cat_id])
+                for ann in self.coco.loadAnns(ann_ids):
+                    if ann.get("ignore", False) or ann.get("iscrowd", 0) != 0:
+                        continue
+                    pose = ann.get("pose", [0] * 12)
+                    if len(pose) < 12:
+                        continue
+                    tz = pose[2]
+                    if tz <= 1e-6 or not np.isfinite(tz):
+                        continue
+                    cat_to_idx[cat_id].append(img_id_to_idx[iid])
+                    break
+
+        self.class_to_image_idx = {k: v for k, v in cat_to_idx.items() if v}
+        total_entries = sum(len(v) for v in self.class_to_image_idx.values())
+        print(
+            f"class_to_image_idx cache: {len(self.class_to_image_idx)} classes, "
+            f"{total_entries} entries"
+        )
+
     def _safe_deep_copy(self, obj):
         if isinstance(obj, Pose):
             return Pose(obj.clone())
@@ -296,10 +339,69 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
             except:
                 return obj
 
-    def load_item(self, idx):
-        image, target = super(CocoDetection, self).__getitem__(idx)
+    def load_item(self, idx, target_class_label=None, min_visibility=0.0, draft_size=None):
+        """Load (image, target) for `idx`.
+
+        Args:
+            target_class_label: light-mode (single ann of given class).
+            draft_size: (W, H) — JPEG draft mode 사용. PIL이 reduced size로 빠르게 decode.
+                JPEG에서만 효과 있고, PNG는 no-op (PIL이 무시). bbox/area는 비례 scale.
+                cam_K, segmentation은 그대로 (Resize transform이 cam_K를 처리 안 하는
+                정상 path 동작과 동등; segmentation은 RLE size mismatch 시
+                convert_coco_poly_to_mask가 자동 align).
+        """
         image_id = self.ids[idx]
-        target = {"image_id": image_id, "annotations": target}
+        if draft_size is not None:
+            # Custom load with draft (super().__getitem__ 우회)
+            from PIL import Image as PILImage
+            file_name = self.coco.loadImgs(image_id)[0]['file_name']
+            path = os.path.join(self.img_folder, file_name)
+            image = PILImage.open(path)
+            raw_W, raw_H = image.size
+            image.draft('RGB', draft_size)
+            image = image.convert('RGB')
+            new_W, new_H = image.size
+            sx = new_W / raw_W
+            sy = new_H / raw_H
+            # Annotation: bbox/area만 scale (raw → image scale).
+            # cam_K, segmentation, pose 등은 그대로 (정상 path와 동일).
+            raw_anns = self.coco.loadAnns(self.coco.getAnnIds(imgIds=image_id))
+            if abs(sx - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6:
+                anns = []
+                for a in raw_anns:
+                    ac = dict(a)
+                    if 'bbox' in a and a['bbox']:
+                        x, y, w, h = a['bbox']
+                        ac['bbox'] = [x * sx, y * sy, w * sx, h * sy]
+                    if 'area' in a:
+                        ac['area'] = a['area'] * sx * sy
+                    anns.append(ac)
+            else:
+                anns = raw_anns
+        else:
+            image, anns = super(CocoDetection, self).__getitem__(idx)
+
+        if target_class_label is not None:
+            selected = None
+            for a in anns:
+                if a.get("ignore", False) or a.get("iscrowd", 0) != 0:
+                    continue
+                cat_id = a.get("category_id", 0)
+                if self.remap_mscoco_category and self.mscoco_category2label:
+                    label = self.mscoco_category2label.get(cat_id, cat_id)
+                else:
+                    label = cat_id
+                if label != target_class_label:
+                    continue
+                if a.get("visibility", 1.0) < min_visibility:
+                    continue
+                selected = a
+                break
+            if selected is None:
+                return None, None
+            anns = [selected]
+
+        target = {"image_id": image_id, "annotations": anns}
 
         # cam_K, need_aligned, paligned_values를 ConvertCocoPolysToMask에 전달
         if self.remap_mscoco_category:
@@ -408,6 +510,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
     def extra_repr(self) -> str:
         s = f" img_folder: {self.img_folder}\n ann_file: {self.ann_file}\n"
         s += f" return_masks: {self.return_masks}\n"
+        s += f" return_full_masks: {self.return_full_masks}\n"
         s += f" need_aligned: {self.need_aligned}\n"
         if hasattr(self, "_transforms") and self._transforms is not None:
             s += f" transforms:\n   {repr(self._transforms)}"
@@ -441,12 +544,25 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):
+    """polygon → (h, w) mask. compressed RLE은 자체 size로 decode되므로
+    image size와 다를 때(load_item draft_size 등) 자동으로 (h, w)로 resize.
+    정상 path(image size = RLE size)에서는 분기 skip → no-op."""
     masks = []
     for polygons in segmentations:
         rles = coco_mask.frPyObjects(polygons, height, width)
         mask = coco_mask.decode(rles)
         if len(mask.shape) < 3:
             mask = mask[..., None]
+        # compressed RLE은 frPyObjects가 (h, w)를 무시하고 자체 size로 decode.
+        # image와 mismatch 시 image size에 맞춰 resize (binary → INTER_NEAREST).
+        if mask.shape[0] != height or mask.shape[1] != width:
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            if mask.ndim == 2:
+                mask = mask[..., None]
         mask = torch.as_tensor(mask, dtype=torch.uint8)
         mask = mask.any(dim=2)
         masks.append(mask)
@@ -458,8 +574,9 @@ def convert_coco_poly_to_mask(segmentations, height, width):
 
 
 class ConvertCocoPolysToMask(object):
-    def __init__(self, return_masks=False):
+    def __init__(self, return_masks=False, return_full_masks=True):
         self.return_masks = return_masks
+        self.return_full_masks = return_full_masks
 
     def __call__(self, image: Image.Image, target, **kwargs):
         w, h = image.size
@@ -509,9 +626,15 @@ class ConvertCocoPolysToMask(object):
             segmentations = [obj["segmentation"] for obj in anno]
             masks = convert_coco_poly_to_mask(segmentations, h, w)
 
-            # full_masks for amodal bbox (RandomTransformAug에서 사용)
+            # full_masks: amodal silhouette. PoseAugmentation 등 geometric aug에서
+            # warp 후 amodal bbox 재계산용. 비활성화 가능 (return_full_masks=False)
+            # — geometric aug 없는 config는 polygon decode skip → I/O 단축.
             full_masks = None
-            if len(anno) > 0 and ("full_masks" in anno[0] or "full_segmentation" in anno[0]):
+            if (
+                self.return_full_masks
+                and len(anno) > 0
+                and ("full_masks" in anno[0] or "full_segmentation" in anno[0])
+            ):
                 full_segmentations = [
                     obj.get("full_masks", obj.get("full_segmentation", obj["segmentation"]))
                     for obj in anno
@@ -534,6 +657,26 @@ class ConvertCocoPolysToMask(object):
                     vis = 1.0
                 raw_visibility.append(vis)
         visibility = torch.tensor(raw_visibility, dtype=torch.float32)
+
+        # px_count_all: BOP 3× canvas full silhouette 픽셀 수 복원.
+        # visib_fract = px_count_visib / px_count_all 이므로
+        #   px_count_all = visib_mask_area / visib_fract
+        # 이 값은 truncation+occlusion 모두 깎인 분모. 기하 증강 (ZoomPose 등)
+        # 적용 시 area scale factor (z²)로 갱신하면 post-aug에서도 BOP 정의에
+        # 맞는 visibility 재계산 가능. visibility=0/missing은 fallback으로
+        # visib_area를 그대로 (filter가 0/0=0 처리해 자연 drop).
+        if self.return_masks:
+            visib_areas = masks.reshape(masks.shape[0], -1).sum(dim=1).float()
+        else:
+            bw = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
+            bh = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+            visib_areas = (bw * bh).float()
+        safe_vis = visibility.clamp(min=1e-6)
+        px_count_all = torch.where(
+            visibility > 1e-6,
+            visib_areas / safe_vis,
+            visib_areas,
+        )
 
         # ignore=True / iscrowd=1 ann 제외 (BOP convention: 평가 대상 아님 +
         # 보통 tz<diameter/2 인 합성 잡음 → projection에서 Z<0 발생).
@@ -563,6 +706,7 @@ class ConvertCocoPolysToMask(object):
         target["labels"] = labels
         target["cam_K"] = cam_Ks
         target["visibility"] = visibility[keep]
+        target["px_count_all"] = px_count_all[keep]
         if self.return_masks:
             target["masks"] = masks
             if full_masks is not None:

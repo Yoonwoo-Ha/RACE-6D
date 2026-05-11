@@ -15,14 +15,11 @@ class MixedDomainDataset(Dataset):
 
     __share__ = ["num_classes"]
 
-    def __init__(self, datasets, sampling_ratios, copy_paste_config=None, use_real_length=False, **kwargs):
+    def __init__(self, datasets, sampling_ratios, use_real_length=False, **kwargs):
         """
         Args:
             datasets: list of Dataset objects or configs (dicts)
             sampling_ratios: list of float, 각 dataset의 샘플링 비율
-            copy_paste_config: dict with keys:
-                - pbr_idx: index of PBR dataset (source)
-                - real_idx: index of Real dataset (target)
             use_real_length: if True, use only Real dataset length (not sum of all)
         """
         from ...core.workspace import GLOBAL_CONFIG
@@ -40,14 +37,6 @@ class MixedDomainDataset(Dataset):
 
         self.sampling_ratios = sampling_ratios
         self.use_real_length = use_real_length
-
-        # Setup CopyPaste augmentation if configured
-        if copy_paste_config is not None:
-            self._setup_copy_paste(copy_paste_config)
-            # If use_real_length, set total_size to Real dataset length
-            if use_real_length:
-                real_idx = copy_paste_config.get("real_idx", 1)
-                self._real_length = len(self.datasets[real_idx])
 
         # 각 dataset의 크기
         self.dataset_sizes = [len(d) for d in self.datasets]
@@ -205,35 +194,3 @@ class MixedDomainDataset(Dataset):
         # 현재 epoch에 맞는 인덱스 매핑 생성
         self._generate_indices(epoch)
 
-    def _setup_copy_paste(self, config):
-        """Setup CopyPaste augmentation by linking PBR dataset to Real dataset's transform"""
-        from ..transforms.copy_paste import CopyPastePBRToReal
-
-        pbr_idx = config.get("pbr_idx", 0)
-        real_idx = config.get("real_idx", 1)
-
-        if pbr_idx >= len(self.datasets) or real_idx >= len(self.datasets):
-            print(f"Warning: Invalid copy_paste_config indices. Skipping.")
-            return
-
-        pbr_dataset = self.datasets[pbr_idx]
-        real_dataset = self.datasets[real_idx]
-
-        # Find CopyPastePBRToReal transform in Real dataset's transforms
-        # CocoDetection uses _transforms, so check both
-        transforms_attr = None
-        if hasattr(real_dataset, "_transforms") and real_dataset._transforms is not None:
-            transforms_attr = real_dataset._transforms
-        elif hasattr(real_dataset, "transforms") and real_dataset.transforms is not None:
-            transforms_attr = real_dataset.transforms
-
-        if transforms_attr is not None:
-            if hasattr(transforms_attr, "transforms"):
-                # Compose object
-                for t in transforms_attr.transforms:
-                    if isinstance(t, CopyPastePBRToReal):
-                        t.set_pbr_dataset(pbr_dataset)
-                        print(f"CopyPaste: Linked PBR dataset (idx={pbr_idx}) to Real dataset (idx={real_idx})")
-                        return
-
-        print(f"Warning: CopyPastePBRToReal transform not found in Real dataset's transforms")

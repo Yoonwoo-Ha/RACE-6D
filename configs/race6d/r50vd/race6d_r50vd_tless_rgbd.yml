@@ -120,6 +120,7 @@ train_dataloader:
         epoch: [0, 30]
         ops: [DepthAugment, RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
     return_masks: True
+    return_full_masks: False
     remap_mscoco_category: True
     return_depth: True
     category_file: ./configs/race6d/include/tless2coco_category.yml
@@ -140,6 +141,7 @@ val_dataloader:
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
     return_masks: True
+    return_full_masks: False
     remap_mscoco_category: True
     return_depth: True
     category_file: ./configs/race6d/include/tless2coco_category.yml

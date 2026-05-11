@@ -14,7 +14,8 @@ torchvision.disable_beta_transforms_warning()
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as F
 
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True  # tolerate truncated cc_textures JPEGs
 
 import numpy as np
 import cv2
@@ -31,7 +32,29 @@ from ...core import register, GLOBAL_CONFIG
 RandomPhotometricDistort = register()(T.RandomPhotometricDistort)
 RandomZoomOut = register()(T.RandomZoomOut)
 RandomHorizontalFlip = register()(T.RandomHorizontalFlip)
-Resize = register()(T.Resize)
+@register()
+class Resize(T.Resize):
+    @staticmethod
+    def _get_hw(img):
+        if hasattr(img, 'shape'):
+            return img.shape[-2], img.shape[-1]
+        return img.height, img.width
+
+    def forward(self, *inputs):
+        sample = inputs if len(inputs) > 1 else inputs[0]
+        orig_h, orig_w = self._get_hw(sample[0])
+
+        out = super().forward(*inputs)
+        out_sample = out if isinstance(out, (list, tuple)) else (out,)
+        new_h, new_w = self._get_hw(out_sample[0])
+
+        target = out_sample[1]
+        if "px_count_all" in target:
+            area_ratio = (new_h * new_w) / (orig_h * orig_w)
+            target["px_count_all"] = target["px_count_all"] * area_ratio
+
+        return out
+
 SanitizeBoundingBoxes = register(name="SanitizeBoundingBoxes")(SanitizeBoundingBoxes)
 RandomCrop = register()(T.RandomCrop)
 Normalize = register()(T.Normalize)
@@ -77,6 +100,9 @@ class AugmentationManager:
 
     def get_probability(self, transform_name: str) -> float:
         """변환 기법별 실제 적용 확률 계산"""
+        import os
+        if os.environ.get("AUG_FORCE_P_ONE", "0") == "1":
+            return 1.0
         if hasattr(self.probs, transform_name):
             adjustment = getattr(self.probs, transform_name)
 
@@ -127,6 +153,14 @@ class BackgroundColors:
         "floor_brown": [139, 115, 85],
         "ceiling_white": [248, 248, 255],
         "room_beige": [245, 245, 220],
+    }
+
+    ITODD = {
+        "itodd_dark_25": [25, 25, 25],
+        "itodd_dark_32": [32, 32, 32],
+        "itodd_dark_39": [39, 39, 39],
+        "itodd_dark_48": [48, 48, 48],
+        "itodd_dark_58": [58, 58, 58],
     }
 
 
@@ -663,11 +697,11 @@ class RandomGrayscale(T.Transform):
 
     _transformed_types = (PILImage.Image, Image)
 
-    def __init__(self, alpha_range: Tuple[float, float] = (0.0, 1.0)) -> None:
+    def __init__(self, alpha_range: Tuple[float, float] = (0.0, 1.0), p: float = None) -> None:
         super().__init__()
         self.alpha_range = alpha_range
         self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("grayscale")
+        self.p = p if p is not None else self.aug_manager.get_probability("grayscale")
 
     def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         if torch.rand(1) >= self.p:
@@ -681,12 +715,14 @@ class RandomGrayscale(T.Transform):
         if isinstance(inpt, Image):
             inpt = F.to_pil_image(inpt)
         if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            gray = np.dot(img_array[:, :, :3], [0.2989, 0.5870, 0.1140])
-            gray_3ch = np.stack([gray, gray, gray], axis=2)
             alpha = params["alpha"]
-            blended = img_array * (1.0 - alpha) + gray_3ch * alpha
-            blended = np.clip(blended, 0, 255).astype(np.uint8)
+            arr = np.array(inpt)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            if alpha >= 1.0:
+                gray_3ch = cv2.merge([gray, gray, gray])
+                return PILImage.fromarray(gray_3ch)
+            gray_3ch = cv2.merge([gray, gray, gray])
+            blended = cv2.addWeighted(arr, 1.0 - alpha, gray_3ch, alpha, 0)
             return PILImage.fromarray(blended)
         return inpt
 
@@ -758,28 +794,37 @@ class RandomGaussianBlur(nn.Module):
         self,
         kernel_sizes: List[int] = [3, 5, 7],
         sigma_range: Tuple[float, float] = (0.0, 3.0),
+        p: float = None,
     ) -> None:
         super().__init__()
         self.kernel_sizes = kernel_sizes
         self.sigma_range = sigma_range
         self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("gaussian_blur")
+        self.p = p if p is not None else self.aug_manager.get_probability("gaussian_blur")
 
     def forward(self, *inputs):
         if torch.rand(1) >= self.p:
             return inputs if len(inputs) > 1 else inputs[0]
-        # 랜덤 커널 사이즈 선택
         kernel_size = self.kernel_sizes[
             torch.randint(0, len(self.kernel_sizes), (1,)).item()
         ]
         sigma = float(torch.empty(1).uniform_(self.sigma_range[0], self.sigma_range[1]))
         if sigma < 0.1:
-            # sigma가 너무 작으면 blur 효과 없음, 원본 반환
             return inputs if len(inputs) > 1 else inputs[0]
-        blur = T.GaussianBlur(
-            kernel_size=(kernel_size, kernel_size), sigma=(sigma, sigma)
-        )
-        return blur(*inputs)
+
+        if len(inputs) > 1:
+            image, rest = inputs[0], inputs[1:]
+        else:
+            image, rest = inputs[0], ()
+
+        if isinstance(image, Image):
+            image = F.to_pil_image(image)
+        if isinstance(image, PILImage.Image):
+            img_np = np.array(image, dtype=np.float32)
+            blurred = cv2.GaussianBlur(img_np, (kernel_size, kernel_size), sigma)
+            image = PILImage.fromarray(np.clip(blurred, 0, 255).astype(np.uint8))
+
+        return (image, *rest) if rest else image
 
 
 @register()
@@ -929,18 +974,20 @@ class RandomCoarseDropout(T.Transform):
 
     def __init__(
         self,
-        p: Union[float, Tuple[float, float]] = 0.2,
+        p: float = None,
+        drop_prob: Union[float, Tuple[float, float]] = 0.2,
         size_percent: Union[float, Tuple[float, float]] = 0.05,
         per_channel: bool = False,
         min_size: int = 3,
+        dilation: int = 0,
     ) -> None:
         super().__init__()
 
-        # p 파라미터 처리 (드롭아웃 확률)
-        if isinstance(p, (int, float)):
-            self.p_range = (p, p)
+        # drop_prob: 픽셀별 드롭아웃 확률
+        if isinstance(drop_prob, (int, float)):
+            self.p_range = (drop_prob, drop_prob)
         else:
-            self.p_range = p
+            self.p_range = drop_prob
 
         # size_percent 처리 (낮은 해상도 크기)
         if isinstance(size_percent, (int, float)):
@@ -950,9 +997,10 @@ class RandomCoarseDropout(T.Transform):
 
         self.per_channel = per_channel
         self.min_size = min_size
+        self.dilation = dilation
 
         self.aug_manager = AugmentationManager()
-        self.p_apply = self.aug_manager.get_probability("coarse_dropout")
+        self.p_apply = p if p is not None else self.aug_manager.get_probability("coarse_dropout")
 
     def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         if torch.rand(1) >= self.p_apply:
@@ -1011,35 +1059,32 @@ class RandomCoarseDropout(T.Transform):
         img_result = img.copy().astype(np.float32)
 
         if self.per_channel and len(img.shape) == 3:
-            # 채널별로 독립적인 마스크 생성
             for c in range(channels):
-                # 1. 낮은 해상도에서 드롭아웃 마스크 생성
                 low_mask = (
                     torch.rand(low_height, low_width) >= p_dropout
-                )  # keep mask (1=keep, 0=drop)
-                low_mask = low_mask.float().numpy()
+                ).float().numpy()
 
-                # 2. 마스크를 원본 크기로 업샘플링 (nearest neighbor)
+                if self.dilation > 0:
+                    kernel = np.ones((self.dilation, self.dilation), np.uint8)
+                    low_mask = cv2.erode(low_mask.astype(np.uint8), kernel, iterations=1).astype(np.float32)
+
                 mask = cv2.resize(
                     low_mask, (img_width, img_height), interpolation=cv2.INTER_NEAREST
                 )
-
-                # 3. 마스크 적용
                 img_result[:, :, c] *= mask
         else:
-            # 전체 이미지에 동일한 마스크 적용
-            # 1. 낮은 해상도에서 드롭아웃 마스크 생성
-            low_mask = torch.rand(low_height, low_width) >= p_dropout  # keep mask
-            low_mask = low_mask.float().numpy()
+            low_mask = (torch.rand(low_height, low_width) >= p_dropout).float().numpy()
 
-            # 2. 마스크를 원본 크기로 업샘플링
+            if self.dilation > 0:
+                kernel = np.ones((self.dilation, self.dilation), np.uint8)
+                low_mask = cv2.erode(low_mask.astype(np.uint8), kernel, iterations=1).astype(np.float32)
+
             mask = cv2.resize(
                 low_mask, (img_width, img_height), interpolation=cv2.INTER_NEAREST
             )
 
-            # 3. 마스크 적용
             if len(img.shape) == 3:
-                mask = mask[:, :, np.newaxis]  # 채널 차원 추가
+                mask = mask[:, :, np.newaxis]
             img_result *= mask
 
         # 결과를 uint8로 변환
@@ -1053,6 +1098,293 @@ class RandomCoarseDropout(T.Transform):
         if isinstance(inpt, (PILImage.Image, Image)):
             return self._apply_coarse_dropout(inpt, params)
         return inpt
+
+
+@register()
+class RandomISPSimulation(T.Transform):
+    """Camera ISP pipeline simulation: Debayering artifacts + Unsharp masking + CLAHE.
+
+    PBR 렌더링에는 없는 실제 카메라 ISP 처리를 시뮬레이션하여 sim-to-real gap 축소.
+    SurfEmb (CVPR 2022) 구현 기반.
+    """
+
+    _transformed_types = (
+        PILImage.Image,
+        Image,
+    )
+
+    def __init__(
+        self,
+        p: float = 0.5,
+        debayer: bool = True,
+        unsharp: bool = True,
+        clahe: bool = True,
+        unsharp_k_limits: Tuple[int, int] = (3, 7),
+        unsharp_strength: Tuple[float, float] = (0.0, 2.0),
+        clahe_clip_limit: float = 2.0,
+        clahe_grid: Tuple[int, int] = (8, 8),
+    ) -> None:
+        super().__init__()
+        self.p = p
+        self.debayer = debayer
+        self.unsharp = unsharp
+        self.clahe = clahe
+        self.unsharp_k_limits = unsharp_k_limits
+        self.unsharp_strength = unsharp_strength
+        self.clahe_clip_limit = clahe_clip_limit
+        self.clahe_grid = clahe_grid
+
+    def _apply_debayer(self, img: np.ndarray) -> np.ndarray:
+        channel_idxs = np.random.permutation(3)
+        channel_idxs_inv = np.empty(3, dtype=int)
+        channel_idxs_inv[channel_idxs] = 0, 1, 2
+
+        bayer = np.zeros(img.shape[:2], dtype=img.dtype)
+        bayer[::2, ::2] = img[::2, ::2, channel_idxs[2]]
+        bayer[1::2, ::2] = img[1::2, ::2, channel_idxs[1]]
+        bayer[::2, 1::2] = img[::2, 1::2, channel_idxs[1]]
+        bayer[1::2, 1::2] = img[1::2, 1::2, channel_idxs[0]]
+
+        method = np.random.choice((cv2.COLOR_BAYER_BG2BGR, cv2.COLOR_BAYER_BG2BGR_EA))
+        return cv2.cvtColor(bayer, method)[..., channel_idxs_inv]
+
+    def _apply_unsharp(self, img: np.ndarray) -> np.ndarray:
+        k = np.random.randint(
+            self.unsharp_k_limits[0] // 2, self.unsharp_k_limits[1] // 2 + 1
+        ) * 2 + 1
+        s = k / 3
+        blur = cv2.GaussianBlur(img, (k, k), s)
+        strength = np.random.uniform(*self.unsharp_strength)
+        return cv2.addWeighted(img, 1 + strength, blur, -strength, 0)
+
+    def _apply_clahe(self, img: np.ndarray) -> np.ndarray:
+        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+        cl = cv2.createCLAHE(
+            clipLimit=self.clahe_clip_limit, tileGridSize=self.clahe_grid
+        )
+        lab[:, :, 0] = cl.apply(lab[:, :, 0])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        return {
+            "apply_transform": torch.rand(1).item() < self.p,
+            "do_debayer": self.debayer and torch.rand(1).item() < 0.5,
+            "do_unsharp": self.unsharp and torch.rand(1).item() < 0.5,
+            "do_clahe": self.clahe and torch.rand(1).item() < 0.5,
+        }
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params["apply_transform"]:
+            return inpt
+        if not isinstance(inpt, (PILImage.Image, Image)):
+            return inpt
+
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        img = np.array(inpt)
+
+        if params["do_debayer"]:
+            img = self._apply_debayer(img)
+        if params["do_unsharp"]:
+            img = self._apply_unsharp(img)
+        if params["do_clahe"]:
+            img = self._apply_clahe(img)
+
+        return PILImage.fromarray(img)
+
+
+@register()
+class PerClassColorDiversification(nn.Module):
+    """Per-class HSV color diversification on visib_mask regions.
+
+    PBR 텍스처의 색감 오버피팅을 방지하기 위해 클래스별로 독립적인
+    HSV 변환을 적용. 텍스처 구조(edge, gradient)는 보존하고 색상만 변경.
+    """
+
+    def __init__(
+        self,
+        hue_range: float = 30.0,
+        saturation_range: Tuple[float, float] = (0.7, 1.4),
+        value_range: Tuple[float, float] = (0.8, 1.2),
+        p: float = None,
+    ) -> None:
+        super().__init__()
+        self.hue_range = hue_range
+        self.saturation_range = saturation_range
+        self.value_range = value_range
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else 0.5
+
+    def _random_hsv_params(self) -> Tuple[float, float, float]:
+        hue_shift = float(torch.empty(1).uniform_(-self.hue_range, self.hue_range))
+        sat_scale = float(torch.empty(1).uniform_(*self.saturation_range))
+        val_scale = float(torch.empty(1).uniform_(*self.value_range))
+        return hue_shift, sat_scale, val_scale
+
+    def _apply_hsv_shift(
+        self, img_hsv: np.ndarray, mask: np.ndarray,
+        hue_shift: float, sat_scale: float, val_scale: float,
+    ) -> np.ndarray:
+        mask_bool = mask > 0.5
+        if not mask_bool.any():
+            return img_hsv
+
+        h, s, v = img_hsv[:, :, 0], img_hsv[:, :, 1], img_hsv[:, :, 2]
+        h[mask_bool] = (h[mask_bool].astype(np.float32) + hue_shift) % 180
+        s[mask_bool] = np.clip(s[mask_bool].astype(np.float32) * sat_scale, 0, 255)
+        v[mask_bool] = np.clip(v[mask_bool].astype(np.float32) * val_scale, 0, 255)
+        img_hsv[:, :, 0] = h.astype(np.uint8)
+        img_hsv[:, :, 1] = s.astype(np.uint8)
+        img_hsv[:, :, 2] = v.astype(np.uint8)
+        return img_hsv
+
+    def forward(self, *inputs):
+        if len(inputs) == 1:
+            inputs = inputs[0]
+
+        image, target = inputs[0], inputs[1]
+
+        if torch.rand(1) >= self.p:
+            return inputs
+
+        if "masks" not in target or "labels" not in target:
+            return inputs
+
+        masks = target["masks"]
+        if hasattr(masks, "data"):
+            masks = masks.data
+        labels = target["labels"]
+
+        if len(masks) == 0:
+            return inputs
+
+        if isinstance(image, Image):
+            image = F.to_pil_image(image)
+        img_np = np.array(image)
+        img_hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+
+        unique_labels = torch.unique(labels)
+        class_hsv_params = {int(lbl): self._random_hsv_params() for lbl in unique_labels}
+
+        for i in range(len(masks)):
+            lbl = int(labels[i])
+            mask_np = masks[i].numpy() if isinstance(masks[i], torch.Tensor) else masks[i]
+            if len(mask_np.shape) == 3:
+                mask_np = mask_np.max(axis=0)
+            hue_shift, sat_scale, val_scale = class_hsv_params[lbl]
+            img_hsv = self._apply_hsv_shift(img_hsv, mask_np, hue_shift, sat_scale, val_scale)
+
+        img_result = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2RGB)
+        result_image = PILImage.fromarray(img_result)
+
+        out = list(inputs)
+        out[0] = result_image
+        return tuple(out)
+
+
+@register()
+class MaskRegionDegradation(nn.Module):
+    """visib_mask 영역에만 blur + noise를 적용하여 PBR 렌더링의 과도한 선명함을 완화."""
+
+    def __init__(
+        self,
+        blur_kernel: int = 7,
+        blur_sigma_range: Tuple[float, float] = (2.0, 3.0),
+        noise_scale_range: Tuple[float, float] = (5.0, 10.0),
+        p: float = 0.9,
+    ) -> None:
+        super().__init__()
+        self.blur_kernel = blur_kernel
+        self.blur_sigma_range = blur_sigma_range
+        self.noise_scale_range = noise_scale_range
+        self.p = p
+
+    def forward(self, *inputs):
+        if len(inputs) == 1:
+            inputs = inputs[0]
+
+        image, target = inputs[0], inputs[1]
+
+        if torch.rand(1) >= self.p:
+            return inputs
+
+        if "masks" not in target:
+            return inputs
+
+        masks = target["masks"]
+        if hasattr(masks, "data"):
+            masks = masks.data
+        if len(masks) == 0:
+            return inputs
+
+        if isinstance(image, Image):
+            image = F.to_pil_image(image)
+        img_np = np.array(image, dtype=np.float32)
+
+        # union of all visib masks
+        masks_np = masks.numpy() if isinstance(masks, torch.Tensor) else np.asarray(masks)
+        union_mask = (masks_np.max(axis=0) > 0.5).astype(np.float32)
+
+        # blur
+        sigma = float(torch.empty(1).uniform_(*self.blur_sigma_range))
+        blurred = cv2.GaussianBlur(img_np, (self.blur_kernel, self.blur_kernel), sigma)
+
+        # noise
+        noise_scale = float(torch.empty(1).uniform_(*self.noise_scale_range))
+        noise = np.random.normal(0, noise_scale, img_np.shape).astype(np.float32)
+
+        # apply only on mask region
+        union_3ch = union_mask[:, :, None]
+        degraded = blurred + noise
+        result = img_np * (1.0 - union_3ch) + degraded * union_3ch
+        result = np.clip(result, 0, 255).astype(np.uint8)
+
+        out = list(inputs)
+        out[0] = PILImage.fromarray(result)
+        return tuple(out)
+
+
+@register()
+class GlobalDegradation(nn.Module):
+    """전체 이미지에 blur + noise를 한번에 적용. cv2 기반."""
+
+    def __init__(
+        self,
+        blur_kernel: int = 7,
+        blur_sigma_range: Tuple[float, float] = (2.0, 3.0),
+        noise_scale_range: Tuple[float, float] = (5.0, 10.0),
+        p: float = 0.9,
+    ) -> None:
+        super().__init__()
+        self.blur_kernel = blur_kernel
+        self.blur_sigma_range = blur_sigma_range
+        self.noise_scale_range = noise_scale_range
+        self.p = p
+
+    def forward(self, *inputs):
+        if len(inputs) == 1:
+            inputs = inputs[0]
+
+        image = inputs[0]
+
+        if torch.rand(1) >= self.p:
+            return inputs
+
+        if isinstance(image, Image):
+            image = F.to_pil_image(image)
+        img_np = np.array(image, dtype=np.float32)
+
+        sigma = float(torch.empty(1).uniform_(*self.blur_sigma_range))
+        blurred = cv2.GaussianBlur(img_np, (self.blur_kernel, self.blur_kernel), sigma)
+
+        noise_scale = float(torch.empty(1).uniform_(*self.noise_scale_range))
+        noise = np.random.normal(0, noise_scale, img_np.shape).astype(np.float32)
+
+        result = np.clip(blurred + noise, 0, 255).astype(np.uint8)
+
+        out = list(inputs)
+        out[0] = PILImage.fromarray(result)
+        return tuple(out)
 
 
 @register()
@@ -1594,33 +1926,43 @@ class RandomGaussianNoise(T.Transform):
     def __init__(
         self,
         scale: float = 10.0,
+        scale_range: Tuple[float, float] = None,
         per_channel: bool = True,
+        p: float = None,
     ) -> None:
-        """GDRNPP: Sometimes(0.1, AdditiveGaussianNoise(scale=10, per_channel=True))
-
-        Args:
-            scale: 노이즈 표준편차 (GDRNPP 기본값: 10)
-            per_channel: 채널별 독립 노이즈 (GDRNPP 기본값: True)
+        """Args:
+            scale: 고정 노이즈 표준편차 (scale_range가 없을 때 사용)
+            scale_range: [min, max] 범위에서 랜덤 샘플링 (scale보다 우선)
+            per_channel: 채널별 독립 노이즈
+            p: 적용 확률 override
         """
         super().__init__()
         self.scale = scale
+        self.scale_range = scale_range
         self.per_channel = per_channel
         self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("gaussian_noise")
+        self.p = p if p is not None else self.aug_manager.get_probability("gaussian_noise")
 
     def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         if torch.rand(1) >= self.p:
             return {"apply": False}
-        return {"apply": True, "scale": self.scale}
+        if self.scale_range is not None:
+            s = float(torch.empty(1).uniform_(self.scale_range[0], self.scale_range[1]))
+        else:
+            s = self.scale
+        return {"apply": True, "scale": s}
 
     def _apply_gaussian_noise(self, img: np.ndarray, scale: float) -> np.ndarray:
         if isinstance(img, Image):
             img = F.to_pil_image(img)
         if isinstance(img, PILImage.Image):
             img = np.array(img)
-        noise = np.random.normal(0, scale, img.shape)
-        noisy_img = img.astype(np.float32) + noise
-        result = np.clip(noisy_img, 0, 255).astype(np.uint8)
+        noise = np.empty(img.shape, dtype=np.int16)
+        n_ch = img.shape[2] if img.ndim == 3 else 1
+        mean = tuple([0] * n_ch)
+        std = tuple([scale] * n_ch)
+        cv2.randn(noise, mean, std)
+        result = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
         return PILImage.fromarray(result)
 
     def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
@@ -1639,13 +1981,16 @@ class RandomAdditionalNoise(T.Transform):
     )
 
     def __init__(
-        self, mean: float = 0.0, scale_range: Tuple[float, float] = (7.0, 10.0)
+        self,
+        mean: float = 0.0,
+        scale_range: Tuple[float, float] = (7.0, 10.0),
+        p: float = None,
     ) -> None:
         super().__init__()
         self.mean = mean
         self.scale_range = self._check_range(scale_range, "scale_range")
         self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("additional_noise")
+        self.p = p if p is not None else self.aug_manager.get_probability("additional_noise")
 
     def _check_range(
         self, value: Tuple[float, float], name: str
@@ -1681,433 +2026,25 @@ class RandomAdditionalNoise(T.Transform):
             return self._apply_additional_noise(np.array(inpt), params["scale"])
         return inpt
 
-
-@register()
-class RandomSelect(nn.Module):
-    """두 가지 변환 중 하나를 확률적으로 선택"""
-
-    def __init__(
-        self, transform1: Dict[str, Any], transform2: Dict[str, Any], p: float = 0.5
-    ) -> None:
-        super().__init__()
-        # transform 문자열을 실제 transform 객체로 변환
-        if isinstance(transform1, dict):
-            name1 = transform1.pop("type")
-            self.transform1 = getattr(
-                GLOBAL_CONFIG[name1]["_pymodule"], GLOBAL_CONFIG[name1]["_name"]
-            )(**transform1)
-            transform1["type"] = name1
-
-        if isinstance(transform2, dict):
-            name2 = transform2.pop("type")
-            self.transform2 = getattr(
-                GLOBAL_CONFIG[name2]["_pymodule"], GLOBAL_CONFIG[name2]["_name"]
-            )(**transform2)
-            transform2["type"] = name2
-
-        self.p = p
-
-    def forward(self, *inputs: Any) -> Any:
-        if torch.rand(1) < self.p:
-            return self.transform1(*inputs)
-        return self.transform2(*inputs)
-
-
-@register()
-class ZoomPoseAugmentation(nn.Module):
-    """
-    cam_K 고정 상태에서 이미지 zoom + pose tz 조정
-
-    Zoom은 principal point (cx, cy)를 중심으로 수행됨.
-
-    수학적 원리:
-        투영: u = fx * tx/tz + cx
-        Zoom 후: u' = cx + (u - cx) * zoom_factor
-
-        이를 만족시키려면:
-        - tz_new = tz / zoom_factor
-        - tx, ty는 그대로 유지
-
-    - zoom_factor > 1: 확대 (물체가 가까워 보임) → tz 감소
-    - zoom_factor < 1: 축소 (물체가 멀어 보임) → tz 증가
-
-    ConvertPose 이전에 적용해야 함 (원시 mm 단위 pose 사용)
-    """
-
-    def __init__(
-        self,
-        zoom_factor: float = 1.0,
-        zoom_range: Optional[Tuple[float, float]] = None,
-        p: float = 1.0,
-        fill_value: Union[int, Tuple[int, int, int]] = 114,
-        background_dir: Optional[str] = None,
-    ) -> None:
-        """
-        Args:
-            zoom_factor: 고정 zoom factor (zoom_range가 None일 때 사용)
-            zoom_range: 랜덤 zoom factor 범위 (min, max)
-            p: 적용 확률
-            fill_value: zoom out 시 padding 색상 (background_dir=None일 때만 사용)
-            background_dir: 주어지면 zoom-out 여백을 해당 디렉터리의 random
-                natural image로 채움.
-        """
-        super().__init__()
-        self.zoom_factor = zoom_factor
-        self.zoom_range = zoom_range
-        self.p = p
-        self.fill_value = (
-            fill_value
-            if isinstance(fill_value, tuple)
-            else (fill_value, fill_value, fill_value)
-        )
-        self._background_dir = (
-            os.path.expanduser(background_dir) if background_dir else None
-        )
-        self._background_images: Optional[List[str]] = None
-
-
-    def _load_backgrounds(self) -> List[str]:
-        from pathlib import Path
-        exts = {".jpg", ".jpeg", ".png", ".bmp"}
-        if not self._background_dir:
-            return []
-        return [
-            str(p) for p in Path(self._background_dir).iterdir()
-            if p.suffix.lower() in exts
-        ]
-
-    def _sample_background(self, h: int, w: int) -> Optional[np.ndarray]:
-        if self._background_dir is None:
-            return None
-        if self._background_images is None:
-            self._background_images = self._load_backgrounds()
-        if not self._background_images:
-            return None
-        bg_path = self._background_images[np.random.randint(len(self._background_images))]
-        bg_img = PILImage.open(bg_path).convert("RGB")
-        bg_np = np.array(bg_img.resize((w, h)))
-        return bg_np
-    def _get_zoom_factor(self) -> float:
-        """zoom factor 결정"""
-        if self.zoom_range is not None:
-            return float(
-                torch.empty(1).uniform_(self.zoom_range[0], self.zoom_range[1])
-            )
-        return self.zoom_factor
-
-    def _zoom_in_image(
-        self, img: np.ndarray, zoom_factor: float, cx: float, cy: float
-    ) -> np.ndarray:
-        h, w = img.shape[:2]
-
-        crop_w = w / zoom_factor
-        crop_h = h / zoom_factor
-
-        crop_x1 = cx * (1 - 1 / zoom_factor)
-        crop_y1 = cy * (1 - 1 / zoom_factor)
-        crop_x2 = crop_x1 + crop_w
-        crop_y2 = crop_y1 + crop_h
-
-        pad_left = max(0, -crop_x1)
-        pad_top = max(0, -crop_y1)
-        pad_right = max(0, crop_x2 - w)
-        pad_bottom = max(0, crop_y2 - h)
-
-        crop_x1 = max(0, crop_x1)
-        crop_y1 = max(0, crop_y1)
-        crop_x2 = min(w, crop_x2)
-        crop_y2 = min(h, crop_y2)
-
-        cropped = img[int(crop_y1) : int(crop_y2), int(crop_x1) : int(crop_x2)]
-
-        if pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0:
-            cropped = cv2.copyMakeBorder(
-                cropped,
-                int(pad_top),
-                int(pad_bottom),
-                int(pad_left),
-                int(pad_right),
-                cv2.BORDER_CONSTANT,
-                value=self.fill_value,
-            )
-        zoomed = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
-        return zoomed
-
-    def _zoom_out_image(
-        self, img: np.ndarray, zoom_factor: float, cx: float, cy: float
-    ) -> np.ndarray:
-        """
-        Zoom out: 이미지 축소 후 principal point가 중심에 오도록 padding
-        """
-        h, w = img.shape[:2]
-
-        # 축소된 크기
-        new_w = int(w * zoom_factor)
-        new_h = int(h * zoom_factor)
-
-        # resize (축소)
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-        # principal point가 원래 위치에 오도록 padding 계산
-        # 축소 후 cx_new = cx * zoom_factor
-        # padding 후 cx가 원래 위치에 있으려면:
-        # pad_left + cx * zoom_factor = cx
-        # pad_left = cx * (1 - zoom_factor)
-        pad_left = int(cx * (1 - zoom_factor))
-        pad_top = int(cy * (1 - zoom_factor))
-        pad_right = w - new_w - pad_left
-        pad_bottom = h - new_h - pad_top
-
-        # 음수 padding 처리 (이미지가 canvas보다 클 때)
-        if pad_left < 0:
-            resized = resized[:, -pad_left:]
-            pad_left = 0
-        if pad_top < 0:
-            resized = resized[-pad_top:, :]
-            pad_top = 0
-        if pad_right < 0:
-            resized = resized[:, :pad_right]
-            pad_right = 0
-        if pad_bottom < 0:
-            resized = resized[:pad_bottom, :]
-            pad_bottom = 0
-
-        # Fill strategy: background image (RGB only) or constant fill
-        is_rgb = img.ndim == 3 and img.shape[2] == 3
-        bg = self._sample_background(h, w) if is_rgb else None
-        if bg is not None:
-            rh, rw = resized.shape[:2]
-            rh = min(rh, h - pad_top)
-            rw = min(rw, w - pad_left)
-            canvas = bg.copy()
-            if rh > 0 and rw > 0:
-                canvas[pad_top:pad_top + rh, pad_left:pad_left + rw] = resized[:rh, :rw]
-            zoomed = canvas
-        else:
-            fill_for_pad = 0 if not is_rgb else self.fill_value
-            zoomed = cv2.copyMakeBorder(
-                resized, pad_top, pad_bottom, pad_left, pad_right,
-                cv2.BORDER_CONSTANT, value=fill_for_pad,
-            )
-
-        # 크기 보정 (rounding으로 인한 1-2픽셀 차이)
-        if zoomed.shape[0] != h or zoomed.shape[1] != w:
-            zoomed = cv2.resize(zoomed, (w, h), interpolation=cv2.INTER_LINEAR)
-
-        return zoomed
-
-    def _zoom_image(
-        self, image: Any, zoom_factor: float, cx: float, cy: float
-    ) -> PILImage.Image:
-        """이미지 zoom 적용"""
-        if isinstance(image, PILImage.Image):
-            img = np.array(image)
-        elif isinstance(image, Image):
-            img = image.permute(1, 2, 0).numpy()
-        else:
-            img = np.array(image)
-
-        if zoom_factor > 1:
-            zoomed = self._zoom_in_image(img, zoom_factor, cx, cy)
-        elif zoom_factor < 1:
-            zoomed = self._zoom_out_image(img, zoom_factor, cx, cy)
-        else:
-            zoomed = img
-
-        return PILImage.fromarray(zoomed.astype(np.uint8))
-
-    def _zoom_poses(self, poses: Any, zoom_factor: float) -> Any:
-        """
-        Pose translation 조정 (tz만 변경)
-
-        수학적 유도:
-        u = fx * tx/tz + cx
-        zoom 후: u' = cx + (u - cx) * zoom_factor
-                   = cx + (fx * tx/tz) * zoom_factor
-                   = fx * (tx * zoom_factor / tz) + cx
-                   = fx * tx / (tz / zoom_factor) + cx
-
-        따라서: tz_new = tz / zoom_factor, tx와 ty는 그대로
-        """
-        if isinstance(poses, torch.Tensor):
-            poses = poses.clone()
-            poses_reshaped = poses.reshape(-1, 12)
-            poses_reshaped[:, 2] = poses_reshaped[:, 2] / zoom_factor  # tz만 조정
-            return poses_reshaped.reshape(poses.shape)
-        elif isinstance(poses, np.ndarray):
-            poses = poses.copy()
-            poses_reshaped = poses.reshape(-1, 12)
-            poses_reshaped[:, 2] = poses_reshaped[:, 2] / zoom_factor  # tz만 조정
-            return poses_reshaped.reshape(poses.shape)
-        else:
-            return poses
-
-    def _zoom_boxes(
-        self,
-        boxes: Any,
-        zoom_factor: float,
-        cx: float,
-        cy: float,
-        img_w: int,
-        img_h: int,
-    ) -> Tuple[Any, torch.Tensor]:
-        """
-        BBox 좌표 변환 (principal point 기준)
-
-        x_new = cx + (x - cx) * zoom_factor
-        y_new = cy + (y - cy) * zoom_factor
-        """
-        if hasattr(boxes, "data"):
-            boxes_data = boxes.data.clone()
-            box_format = boxes.format
-        else:
-            boxes_data = (
-                boxes.clone()
-                if isinstance(boxes, torch.Tensor)
-                else torch.tensor(boxes)
-            )
-            box_format = BoundingBoxFormat.XYXY
-
-        # 좌표 변환
-        boxes_data[:, 0] = cx + (boxes_data[:, 0] - cx) * zoom_factor  # x1
-        boxes_data[:, 1] = cy + (boxes_data[:, 1] - cy) * zoom_factor  # y1
-        boxes_data[:, 2] = cx + (boxes_data[:, 2] - cx) * zoom_factor  # x2
-        boxes_data[:, 3] = cy + (boxes_data[:, 3] - cy) * zoom_factor  # y2
-
-        # 이미지 경계로 clip
-        boxes_data[:, 0] = boxes_data[:, 0].clamp(0, img_w)
-        boxes_data[:, 1] = boxes_data[:, 1].clamp(0, img_h)
-        boxes_data[:, 2] = boxes_data[:, 2].clamp(0, img_w)
-        boxes_data[:, 3] = boxes_data[:, 3].clamp(0, img_h)
-
-        new_boxes = BoundingBoxes(
-            boxes_data, format=box_format, canvas_size=(img_h, img_w)
-        )
-        return new_boxes
-
-    def _zoom_masks(
-        self,
-        masks: Any,
-        zoom_factor: float,
-        cx: float,
-        cy: float,
-        img_w: int,
-        img_h: int,
-    ) -> Any:
-        """Mask zoom (이미지와 동일한 방식)"""
-        if isinstance(masks, torch.Tensor):
-            masks_np = masks.cpu().numpy()
-        else:
-            masks_np = np.array(masks)
-
-        zoomed_masks = []
-        for mask in masks_np:
-            mask_uint8 = (
-                (mask * 255).astype(np.uint8)
-                if mask.max() <= 1
-                else mask.astype(np.uint8)
-            )
-
-            if zoom_factor > 1:
-                zoomed = self._zoom_in_image(mask_uint8, zoom_factor, cx, cy)
-            elif zoom_factor < 1:
-                zoomed = self._zoom_out_image(mask_uint8, zoom_factor, cx, cy)
-            else:
-                zoomed = mask_uint8
-
-            # 이진화 (threshold)
-            zoomed = (zoomed > 127).astype(np.uint8)
-            zoomed_masks.append(zoomed)
-
-        return torch.from_numpy(np.array(zoomed_masks, dtype=np.uint8))
-
-    def forward(self, *inputs):
-        """
-        메인 forward 함수
-
-        입력: (image, target) 또는 (image, target, dataset_info)
-        """
-        # 확률 체크
-        if torch.rand(1) >= self.p:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # 입력 파싱
-        if len(inputs) == 1 and isinstance(inputs[0], tuple):
-            input_tuple = inputs[0]
-        else:
-            input_tuple = inputs
-
-        image = input_tuple[0]
-        target = input_tuple[1] if len(input_tuple) > 1 else {}
-        dataset_info = input_tuple[2] if len(input_tuple) > 2 else None
-
-        # 이미지 크기 확인
-        if isinstance(image, PILImage.Image):
-            img_w, img_h = image.size
-        elif isinstance(image, Image):
-            _, img_h, img_w = image.shape
-        else:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # cam_K에서 principal point 가져오기
-        if "cam_K" in target:
-            cam_K = target["cam_K"]
-            if isinstance(cam_K, torch.Tensor):
-                cam_K = cam_K.cpu().numpy()
-            if len(cam_K.shape) > 1:
-                cam_K = cam_K[0]  # 첫 번째 인스턴스의 cam_K 사용
-            cx, cy = float(cam_K[2]), float(cam_K[5])
-        else:
-            # 기본값: 이미지 중심
-            cx, cy = img_w / 2, img_h / 2
-
-        # zoom factor 결정
-        zoom_factor = self._get_zoom_factor()
-
-        if zoom_factor == 1.0:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        # 이미지 변환
-        transformed_image = self._zoom_image(image, zoom_factor, cx, cy)
-
-        # target 변환 (필터링/visibility 재계산은 후속 FilterSmallBoxLowVis가 담당)
-        transformed_target = target.copy()
-
-        if "poses" in target:
-            poses = target["poses"]
-            if isinstance(poses, Pose):
-                transformed_target["poses"] = Pose(
-                    self._zoom_poses(poses.data, zoom_factor)
-                )
-            else:
-                transformed_target["poses"] = self._zoom_poses(poses, zoom_factor)
-
-        if "boxes" in target:
-            transformed_target["boxes"] = self._zoom_boxes(
-                target["boxes"], zoom_factor, cx, cy, img_w, img_h
-            )
-
-        if "masks" in target:
-            transformed_target["masks"] = self._zoom_masks(
-                target["masks"], zoom_factor, cx, cy, img_w, img_h
-            )
-
-        if "full_masks" in target:
-            transformed_target["full_masks"] = self._zoom_masks(
-                target["full_masks"], zoom_factor, cx, cy, img_w, img_h
-            )
-
-        # 결과 반환
-        if dataset_info is not None:
-            return (transformed_image, transformed_target, dataset_info)
-        elif len(input_tuple) > 1:
-            return (transformed_image, transformed_target)
-        else:
-            return transformed_image
-
-
 # ============================================================================
-# Shared helpers for depth-ordered compositing (CopyPaste, RandomTransformAug)
+# Shared helpers for depth-ordered compositing and geometric pose augmentation.
+#
+# Consumers: CopyPasteSingleClass, FillSingleClass, PoseAugmentation.
+#
+# object dict contract (from `_extract_objects` / `_extract_object_at`):
+#   - pixels        : H×W×3 uint8       — image masked by visib_mask (else 0)
+#   - visib_mask    : H×W uint8         — modal / visible silhouette
+#   - full_mask     : H×W uint8         — amodal silhouette (REQUIRED for
+#                                         geometric pose aug; helper falls
+#                                         back to visib_mask, but
+#                                         PoseAugmentation rejects targets
+#                                         without `full_masks` upfront)
+#   - tz            : float (mm)        — pose[2]
+#   - pose          : tensor[12]        — flat (tx, ty, tz, R[3,3] row-major)
+#   - label         : tensor[1] int64   — class id
+#   - box           : tensor[1, 4] xyxy — modal bbox or None
+#   - cam_K         : tensor[1, 9]      — flat intrinsics or absent
+#   - px_count_all  : float             — BOP amodal pixel count (3× canvas)
 # ============================================================================
 
 def _gaussian_blur_edge(mask: np.ndarray, kernel_size: int = 5) -> np.ndarray:
@@ -2121,7 +2058,7 @@ def _extract_objects(image, target):
     """이미지에서 물체들을 visib_mask 기반으로 추출.
 
     Returns:
-        list of dict: 각 물체 정보 (pixels, visib_mask, full_mask, tz, pose, label, box, cam_K)
+        list of dict: 각 물체 정보 (pixels, visib_mask, full_mask, px_count_all, tz, pose, label, box, cam_K)
     """
     objects = []
     masks = target.get("masks")
@@ -2130,6 +2067,7 @@ def _extract_objects(image, target):
     cam_K = target.get("cam_K")
     full_masks = target.get("full_masks")
     boxes = target.get("boxes")
+    px_count_all = target.get("px_count_all")
 
     if masks is None or poses is None or labels is None:
         return objects
@@ -2159,6 +2097,12 @@ def _extract_objects(image, target):
             "box": box_data[i:i+1].clone() if box_data is not None else None,
         }
 
+        if px_count_all is not None:
+            val = px_count_all[i]
+            obj["px_count_all"] = float(val.item() if isinstance(val, torch.Tensor) else val)
+        else:
+            obj["px_count_all"] = float(visib_mask.sum())
+
         if cam_K is not None:
             obj["cam_K"] = cam_K[i:i+1].clone() if len(cam_K.shape) > 1 else cam_K.unsqueeze(0).clone()
 
@@ -2172,6 +2116,140 @@ def _extract_objects(image, target):
         objects.append(obj)
 
     return objects
+
+
+def _extract_object_at(image, target, idx):
+    """Single-instance variant of `_extract_objects`. Byte-identical to
+    `_extract_objects(image, target)[idx]` but skips the other instances —
+    used by CopyPasteSingleClass where only one candidate per image is
+    needed (saves ~11x time on ITODD's 9.8-instance/image average).
+    """
+    masks = target.get("masks")
+    poses = target.get("poses")
+    labels = target.get("labels")
+    cam_K = target.get("cam_K")
+    full_masks = target.get("full_masks")
+    boxes = target.get("boxes")
+    px_count_all = target.get("px_count_all")
+
+    if masks is None or poses is None or labels is None:
+        return None
+
+    masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
+    if idx >= len(masks_np):
+        return None
+    visib_mask = masks_np[idx]
+    if visib_mask.sum() == 0:
+        return None
+
+    img_np = np.array(image)
+    poses_data = poses.data if isinstance(poses, Pose) else poses
+    box_data = boxes.data if hasattr(boxes, "data") else (
+        boxes if boxes is not None else None
+    )
+
+    pose = poses_data[idx]
+    tz = float(pose[2].item() if isinstance(pose[2], torch.Tensor) else pose[2])
+
+    pixels = img_np.copy()
+    pixels[visib_mask == 0] = 0
+
+    obj = {
+        "pixels": pixels,
+        "visib_mask": visib_mask.astype(np.uint8),
+        "tz": tz,
+        "pose": pose.clone() if isinstance(pose, torch.Tensor) else torch.tensor(pose),
+        "label": labels[idx:idx + 1].clone(),
+        "box": box_data[idx:idx + 1].clone() if box_data is not None else None,
+    }
+
+    if px_count_all is not None:
+        val = px_count_all[idx]
+        obj["px_count_all"] = float(val.item() if isinstance(val, torch.Tensor) else val)
+    else:
+        obj["px_count_all"] = float(visib_mask.sum())
+
+    if cam_K is not None:
+        obj["cam_K"] = (
+            cam_K[idx:idx + 1].clone()
+            if len(cam_K.shape) > 1
+            else cam_K.unsqueeze(0).clone()
+        )
+
+    if full_masks is not None:
+        fm = full_masks[idx]
+        fm_np = fm.numpy() if torch.is_tensor(fm) else np.array(fm)
+        obj["full_mask"] = fm_np.astype(np.uint8)
+    else:
+        obj["full_mask"] = visib_mask.astype(np.uint8)
+
+    return obj
+
+
+def _resize_sample(image, target, target_size):
+    """Resize PIL image + image-plane fields of `target` to `target_size=(W, H)`.
+
+    Scales: masks/full_masks (NEAREST), boxes (xyxy pixel), px_count_all (area).
+    Pose, cam_K, labels are unchanged (metric / original-frame data).
+
+    CopyPasteSingleClass uses this when running AFTER Resize: candidates loaded
+    via dataset.load_item come back at raw image size, this brings them down to
+    the post-Resize size before composite.
+    """
+    W_new, H_new = target_size
+    W_old, H_old = image.size
+    if (W_new, H_new) == (W_old, H_old):
+        return image, target
+
+    sx = W_new / W_old
+    sy = H_new / H_old
+
+    image = image.resize((W_new, H_new), PILImage.BILINEAR)
+
+    masks = target.get("masks")
+    if masks is not None:
+        m_data = masks.data if hasattr(masks, "data") else masks
+        m_np = m_data.numpy() if torch.is_tensor(m_data) else np.asarray(m_data)
+        if len(m_np) > 0:
+            resized = np.stack([
+                cv2.resize(mi.astype(np.uint8), (W_new, H_new),
+                           interpolation=cv2.INTER_NEAREST)
+                for mi in m_np
+            ])
+        else:
+            resized = np.zeros((0, H_new, W_new), dtype=np.uint8)
+        target["masks"] = Mask(torch.from_numpy(resized))
+
+    full_masks = target.get("full_masks")
+    if full_masks is not None:
+        fm_data = full_masks.data if hasattr(full_masks, "data") else full_masks
+        fm_np = fm_data.numpy() if torch.is_tensor(fm_data) else np.asarray(fm_data)
+        if len(fm_np) > 0:
+            resized = np.stack([
+                cv2.resize(fmi.astype(np.uint8), (W_new, H_new),
+                           interpolation=cv2.INTER_NEAREST)
+                for fmi in fm_np
+            ])
+        else:
+            resized = np.zeros((0, H_new, W_new), dtype=np.uint8)
+        target["full_masks"] = Mask(torch.from_numpy(resized))
+
+    boxes = target.get("boxes")
+    if boxes is not None:
+        b_data = boxes.data if hasattr(boxes, "data") else boxes
+        scaled = b_data.clone().float()
+        scaled[:, 0] *= sx
+        scaled[:, 2] *= sx
+        scaled[:, 1] *= sy
+        scaled[:, 3] *= sy
+        target["boxes"] = BoundingBoxes(
+            scaled, format=BoundingBoxFormat.XYXY, canvas_size=(H_new, W_new)
+        )
+
+    if target.get("px_count_all") is not None:
+        target["px_count_all"] = target["px_count_all"] * (sx * sy)
+
+    return image, target
 
 
 def _depth_composite(objects, background, H, W, edge_blur_kernel=5):
@@ -2213,10 +2291,11 @@ def _visibility_filter(objects, occupancy, min_visibility=0.1, min_modal_size=5)
 
     for i, obj in enumerate(objects):
         final_mask = (occupancy == i).astype(np.uint8)
-        full_area = obj["full_mask"].sum()
-        if full_area == 0:
+        pxa = obj.get("px_count_all", 0)
+        denom = pxa if pxa > 0 else obj["full_mask"].sum()
+        if denom == 0:
             continue
-        visibility = final_mask.sum() / full_area
+        visibility = final_mask.sum() / denom
         if visibility < min_visibility:
             continue
 
@@ -2263,12 +2342,13 @@ def _build_target_from_objects(objects, keep_indices, final_masks, H, W):
     target["area"] = torch.tensor([float(fm.sum()) for fm in final_masks], dtype=torch.float32)
     target["iscrowd"] = torch.zeros(len(kept), dtype=torch.int64)
 
-    # visibility 재계산: visib_mask_area / full_mask_area
-    full_masks_np = np.stack([objects[i]["full_mask"] for i in keep_indices], axis=0)
-    visib_areas = np.array([float(fm.sum()) for fm in final_masks])
-    full_areas = np.array([float(fm.sum()) for fm in full_masks_np])
-    vis = np.divide(visib_areas, full_areas, out=np.zeros_like(visib_areas), where=full_areas > 0)
-    target["visibility"] = torch.tensor(vis, dtype=torch.float32)
+    pxa = torch.tensor([o["px_count_all"] for o in kept], dtype=torch.float32)
+    target["px_count_all"] = pxa
+
+    visib_areas = torch.tensor([float(fm.sum()) for fm in final_masks], dtype=torch.float32)
+    target["visibility"] = torch.where(
+        pxa > 1e-6, visib_areas / pxa.clamp(min=1.0), torch.zeros_like(pxa)
+    ).clamp(0.0, 1.0)
 
     return target
 
@@ -2299,528 +2379,653 @@ def _load_background_list(background_dir):
 
 
 # ============================================================================
-# CopyPaste — depth-ordered two-image compositing
+# Geometric pose augmentation: principal-point rotation + zoom
+#
+#   - PoseAugmentation     : scene / instance modes via `per_instance` switch
+#   - `_augment_object_pose`: per-object affine kernel used by instance mode
+# ============================================================================
+
+def _augment_object_pose(obj, cx, cy, angle_deg, scale, H, W):
+    """인스턴스 하나에 principal point 기준 회전 + zoom 적용 (in-place).
+
+    cv2 CCW angle on y-down image → camera Z-axis rotation by -angle.
+    zoom scale s → tz_new = tz / s (투영 크기 s배 확대).
+    """
+    if abs(angle_deg) < 0.1 and abs(scale - 1.0) < 1e-4:
+        return
+
+    M = cv2.getRotationMatrix2D((cx, cy), angle_deg, scale)
+
+    obj["pixels"] = cv2.warpAffine(
+        obj["pixels"], M, (W, H),
+        flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
+    obj["visib_mask"] = cv2.warpAffine(
+        obj["visib_mask"], M, (W, H),
+        flags=cv2.INTER_NEAREST, borderValue=0)
+    obj["full_mask"] = cv2.warpAffine(
+        obj["full_mask"], M, (W, H),
+        flags=cv2.INTER_NEAREST, borderValue=0)
+
+    angle_rad = np.deg2rad(angle_deg)
+    c, s_val = np.cos(-angle_rad), np.sin(-angle_rad)
+    Rz = np.array([[c, -s_val, 0], [s_val, c, 0], [0, 0, 1]], dtype=np.float32)
+
+    pose = obj["pose"]
+    t_old = pose[:3].numpy().astype(np.float32)
+    R_old = pose[3:].numpy().reshape(3, 3).astype(np.float32)
+
+    t_new = Rz @ t_old
+    t_new[2] /= scale
+    R_new = Rz @ R_old
+
+    obj["pose"] = torch.from_numpy(np.concatenate([t_new, R_new.reshape(9)])).float()
+    obj["tz"] = float(t_new[2])
+
+    if "px_count_all" in obj:
+        obj["px_count_all"] *= (scale * scale)
+
+    ys, xs = np.nonzero(obj["full_mask"] > 0)
+    if len(xs) > 0:
+        box = np.array([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], dtype=np.float32)
+        obj["box"] = torch.from_numpy(box).unsqueeze(0)
+
+
+@register()
+class PoseAugmentation(nn.Module):
+    """Unified geometric pose augmentation (rotation + zoom around principal point).
+
+    Modes
+    -----
+    per_instance=False (scene mode)
+        모든 instance에 동일 (angle, scale) affine 적용. cam_K cx,cy 기준.
+        rotation_range=0 → zoom only / zoom_range=(1,1) → rotation only / 둘 다
+        지정 시 결합 변환.
+
+    per_instance=True (instance mode)
+        각 object별로 독립 (angle, scale) 샘플 → cv2 affine warp →
+        depth-ordered composite. revert_visibility 미만으로 가려진 object는
+        backup으로 rollback.
+
+    Math (cv2 image y-down → BOP camera frame, x=right, y=down, z=forward):
+        M       = cv2.getRotationMatrix2D((cx, cy), angle_deg, scale)
+        Rz_3d   = Rodrigues([0, 0, deg2rad(-angle_deg)])
+        t_new   = Rz_3d @ t_old; t_new[2] /= scale
+        R_new   = Rz_3d @ R_old
+        cam_K   = unchanged (principal-point centered transform)
+        px_all  = px_all * scale²
+
+    full_masks REQUIREMENT
+    ----------------------
+    Geometric warp 후 amodal bbox는 warped `full_masks`에서 nonzero tight box로
+    재계산됨. 따라서 target에 `full_masks`가 없으면 `RuntimeError` 발생 (fail-fast).
+    visib_mask로의 silent fallback은 amodal 학습 시그널을 손상시키므로 금지.
+
+    Args
+    ----
+        per_instance     : False = scene-wide / True = per-object
+        rotation_range   : ±deg uniform sample. 0 → rotation off
+        zoom_range       : (min, max) uniform sample. (1.0, 1.0) → zoom off
+        p                : 적용 확률
+        background_dir   : warp 후 빈 영역(scene mode) / canvas(instance mode)
+                           채움용 image 디렉토리. None이면 fill_value 단색
+        fill_value       : background_dir 없을 때 단색 padding
+        revert_visibility: instance mode에서 변환 후 visibility가 이 값 미만이면 변환 취소
+        edge_blur_kernel : instance mode composite 경계 블렌딩 커널 (0=hard)
+        p_rot180         : 추가 180° flip 확률
+    """
+
+    def __init__(
+        self,
+        per_instance: bool = False,
+        rotation_range: float = 0.0,
+        zoom_range: Optional[Tuple[float, float]] = None,
+        p: float = 0.5,
+        background_dir: Optional[str] = None,
+        fill_value: Union[int, Tuple[int, int, int]] = 114,
+        revert_visibility: float = 0.7,
+        edge_blur_kernel: int = 5,
+        p_rot180: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.per_instance = bool(per_instance)
+        self.rotation_range = float(rotation_range)
+        if zoom_range is None:
+            self.zoom_range = (1.0, 1.0)
+        else:
+            self.zoom_range = (float(zoom_range[0]), float(zoom_range[1]))
+        self.p = float(p)
+        self.fill_value = (
+            fill_value if isinstance(fill_value, (tuple, list))
+            else (int(fill_value), int(fill_value), int(fill_value))
+        )
+        bg_dir = os.path.expanduser(background_dir) if background_dir else None
+        self._background_images = _load_background_list(bg_dir) if bg_dir else []
+        self.revert_visibility = float(revert_visibility)
+        self.edge_blur_kernel = int(edge_blur_kernel)
+        self.p_rot180 = float(p_rot180)
+
+    # ---- common helpers --------------------------------------------------
+
+    def _sample_params(self) -> Tuple[float, float]:
+        angle = (
+            float(np.random.uniform(-self.rotation_range, self.rotation_range))
+            if self.rotation_range > 0
+            else 0.0
+        )
+        if self.p_rot180 > 0.0 and np.random.rand() < self.p_rot180:
+            angle += 180.0
+        if self.zoom_range[0] == 1.0 and self.zoom_range[1] == 1.0:
+            scale = 1.0
+        else:
+            scale = float(np.random.uniform(self.zoom_range[0], self.zoom_range[1]))
+        return angle, scale
+
+    @staticmethod
+    def _principal_point(target: dict, W: int, H: int) -> Tuple[float, float]:
+        cam_K = target.get("cam_K")
+        if cam_K is not None and isinstance(cam_K, torch.Tensor):
+            ck = cam_K[0].numpy() if cam_K.dim() > 1 else cam_K.numpy()
+            return float(ck[2]), float(ck[5])
+        return W / 2.0, H / 2.0
+
+    @staticmethod
+    def _pose_rz(angle_deg: float) -> torch.Tensor:
+        """cv2 CCW(y-down image) angle → BOP camera +z rotation by -angle."""
+        a = np.deg2rad(-angle_deg)
+        c, s = np.cos(a), np.sin(a)
+        return torch.from_numpy(
+            np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
+        )
+
+    def _fill_blank(self, warped_img: np.ndarray, valid_mask: np.ndarray,
+                    H: int, W: int) -> np.ndarray:
+        """Warp 후 invalid 영역을 background_dir 이미지 / fill_value 단색으로 채움."""
+        if valid_mask.all():
+            return warped_img
+        if self._background_images:
+            bg_img = _load_background_image(self._background_images, H, W)
+        else:
+            bg_img = np.full((H, W, 3), self.fill_value, dtype=np.uint8)
+        return np.where(valid_mask[..., None], warped_img, bg_img)
+
+    @staticmethod
+    def _warp_masks_3d(masks_np: np.ndarray, M: np.ndarray,
+                       H: int, W: int) -> np.ndarray:
+        """[N, H, W] uint8 mask 스택 → 동일한 affine으로 warp."""
+        return np.stack(
+            [
+                cv2.warpAffine(
+                    m.astype(np.uint8), M, (W, H),
+                    flags=cv2.INTER_NEAREST, borderValue=0,
+                )
+                for m in masks_np
+            ],
+            axis=0,
+        ).astype(np.uint8)
+
+    @staticmethod
+    def _amodal_boxes_from_full(full_arr: np.ndarray) -> np.ndarray:
+        """[N, H, W] full_mask → [N, 4] xyxy tight bbox (empty → (0,0,0,0))."""
+        N = full_arr.shape[0]
+        boxes = np.zeros((N, 4), dtype=np.float32)
+        for i in range(N):
+            ys, xs = np.nonzero(full_arr[i] > 0)
+            if len(xs) == 0:
+                continue
+            boxes[i, 0] = float(xs.min())
+            boxes[i, 1] = float(ys.min())
+            boxes[i, 2] = float(xs.max() + 1)
+            boxes[i, 3] = float(ys.max() + 1)
+        return boxes
+
+    @staticmethod
+    def _return(image, target, dataset_info):
+        if dataset_info is not None:
+            return (image, target, dataset_info)
+        return (image, target)
+
+    # ---- forward ---------------------------------------------------------
+
+    def forward(self, *inputs):
+        if len(inputs) == 1 and isinstance(inputs[0], tuple):
+            input_tuple = inputs[0]
+        else:
+            input_tuple = inputs
+
+        if not isinstance(input_tuple, tuple) or len(input_tuple) < 2:
+            return inputs if len(inputs) > 1 else inputs[0]
+
+        image = input_tuple[0]
+        target = input_tuple[1]
+        dataset_info = input_tuple[2] if len(input_tuple) > 2 else None
+
+        if not isinstance(image, PILImage.Image):
+            return self._return(image, target, dataset_info)
+        if "masks" not in target or "poses" not in target:
+            return self._return(image, target, dataset_info)
+
+        # fail-fast: full_masks REQUIRED for amodal bbox recomputation
+        if "full_masks" not in target or target.get("full_masks") is None:
+            raise RuntimeError(
+                "PoseAugmentation requires `full_masks` in target for amodal "
+                "bbox recomputation after geometric warp. Configure the "
+                "dataset to emit amodal masks (e.g. `return_masks: True` with "
+                "amodal annotations) before applying this transform."
+            )
+
+        if torch.rand(1).item() >= self.p:
+            return self._return(image, target, dataset_info)
+
+        if self.per_instance:
+            return self._apply_instance(image, target, dataset_info)
+        return self._apply_scene(image, target, dataset_info)
+
+    # ---- scene mode ------------------------------------------------------
+
+    def _apply_scene(self, image, target, dataset_info):
+        W, H = image.size
+        cx, cy = self._principal_point(target, W, H)
+
+        angle, scale = self._sample_params()
+        if abs(angle) < 1e-3 and abs(scale - 1.0) < 1e-4:
+            return self._return(image, target, dataset_info)
+
+        M = cv2.getRotationMatrix2D((cx, cy), angle, scale)
+
+        # 1) Image warp + blank fill
+        img_np = np.array(image)
+        warped_img = cv2.warpAffine(
+            img_np, M, (W, H), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0)
+        )
+        valid_mask = (
+            cv2.warpAffine(
+                np.full((H, W), 255, dtype=np.uint8), M, (W, H),
+                flags=cv2.INTER_NEAREST, borderValue=0,
+            )
+            > 127
+        )
+        warped_img = self._fill_blank(warped_img, valid_mask, H, W)
+
+        # 2) Mask warp (visib + full)
+        new_target = dict(target)
+        masks = target["masks"]
+        masks_np = masks.numpy() if torch.is_tensor(masks) else np.asarray(masks)
+        warped_masks = self._warp_masks_3d(masks_np, M, H, W)
+        masks_t = torch.from_numpy(warped_masks)
+        new_target["masks"] = Mask(masks_t) if isinstance(masks, Mask) else masks_t
+
+        full_masks = target["full_masks"]
+        fm_np = full_masks.numpy() if torch.is_tensor(full_masks) else np.asarray(full_masks)
+        warped_full = self._warp_masks_3d(fm_np, M, H, W)
+        full_t = torch.from_numpy(warped_full)
+        new_target["full_masks"] = (
+            Mask(full_t) if isinstance(full_masks, Mask) else full_t
+        )
+
+        # 3) Pose transform: Rz @ t, tz /= scale, R_new = Rz @ R
+        Rz = self._pose_rz(angle)
+        poses = target["poses"]
+        poses_data = poses.data if hasattr(poses, "data") else poses
+        poses_data = poses_data.clone()
+        N = poses_data.shape[0]
+        t_old = poses_data[:, :3]
+        R_old = poses_data[:, 3:].reshape(N, 3, 3)
+        t_new = (Rz @ t_old.unsqueeze(-1)).squeeze(-1)
+        if abs(scale - 1.0) > 1e-4:
+            t_new = t_new.clone()
+            t_new[:, 2] = t_new[:, 2] / scale
+        R_new = Rz @ R_old
+        new_poses_data = torch.cat([t_new, R_new.reshape(N, 9)], dim=-1)
+        new_target["poses"] = (
+            Pose(new_poses_data) if isinstance(poses, Pose) else new_poses_data
+        )
+
+        # 4) Bbox 재계산 from warped full_masks (amodal)
+        new_boxes = self._amodal_boxes_from_full(warped_full)
+        new_target["boxes"] = BoundingBoxes(
+            torch.from_numpy(new_boxes),
+            format=BoundingBoxFormat.XYXY,
+            canvas_size=(H, W),
+        )
+
+        # 5) px_count_all (rotation 보존, zoom z²) + visibility = visib/px_all
+        if "px_count_all" in target:
+            scale_factor = float(scale) ** 2
+            pxa = target["px_count_all"]
+            if isinstance(pxa, torch.Tensor):
+                new_pxa = pxa.float() * scale_factor
+            else:
+                new_pxa = torch.from_numpy(
+                    np.asarray(pxa, dtype=np.float32) * scale_factor
+                )
+            new_target["px_count_all"] = new_pxa
+
+            visib_areas = masks_t.reshape(N, -1).sum(dim=1).float()
+            new_target["visibility"] = torch.where(
+                new_pxa > 1e-6,
+                visib_areas / new_pxa.clamp(min=1.0),
+                torch.zeros_like(new_pxa),
+            ).clamp(0.0, 1.0)
+
+        result_image = PILImage.fromarray(warped_img.astype(np.uint8))
+        return self._return(result_image, new_target, dataset_info)
+
+    # ---- instance mode ---------------------------------------------------
+
+    def _apply_instance(self, image, target, dataset_info):
+        import random
+        import copy
+
+        W, H = image.size
+        cx, cy = self._principal_point(target, W, H)
+
+        objects = _extract_objects(image, target)
+        if not objects:
+            return self._return(image, target, dataset_info)
+
+        # background = non-object pixel median (단색 패치 회피)
+        img_np = np.array(image)
+        all_mask = np.zeros((H, W), dtype=bool)
+        for obj in objects:
+            all_mask |= (obj["visib_mask"] > 0)
+        non_obj = ~all_mask
+        if non_obj.any():
+            median_color = np.median(img_np[non_obj], axis=0).astype(np.uint8)
+        else:
+            median_color = np.array([128, 128, 128], dtype=np.uint8)
+        background = img_np.copy()
+        background[all_mask] = median_color
+
+        for i, obj in enumerate(objects):
+            pxa = obj["px_count_all"]
+            if pxa <= 0:
+                continue
+            backup = copy.deepcopy(obj)
+            angle, scale = self._sample_params()
+            _augment_object_pose(obj, cx, cy, angle, scale, H, W)
+            denom = max(obj["px_count_all"], 1.0)
+            vis = float(obj["visib_mask"].sum()) / denom
+            if vis < self.revert_visibility:
+                objects[i] = backup
+
+        objects.sort(key=lambda x: -x["tz"])
+        canvas, occupancy = _depth_composite(
+            objects, background, H, W, self.edge_blur_kernel
+        )
+
+        keep_indices = []
+        final_masks = []
+        for i in range(len(objects)):
+            fm = (occupancy == i).astype(np.uint8)
+            if fm.sum() > 0:
+                keep_indices.append(i)
+                final_masks.append(fm)
+
+        if not keep_indices:
+            return self._return(image, target, dataset_info)
+
+        merged = _build_target_from_objects(objects, keep_indices, final_masks, H, W)
+        if merged is None:
+            return self._return(image, target, dataset_info)
+
+        # Amodal bbox 재계산: each kept obj's warped full_mask
+        kept = [objects[i] for i in keep_indices]
+        N = len(kept)
+        full_arr = np.stack([o["full_mask"] for o in kept], axis=0)
+        new_boxes = self._amodal_boxes_from_full(full_arr)
+        merged["boxes"] = BoundingBoxes(
+            torch.from_numpy(new_boxes),
+            format=BoundingBoxFormat.XYXY,
+            canvas_size=(H, W),
+        )
+
+        for k in target:
+            if k not in merged:
+                merged[k] = target[k]
+
+        result = PILImage.fromarray(canvas)
+        return self._return(result, merged, dataset_info)
+
+# ============================================================================
+# FillSingleClass — single-class scene augmentation for ITODD-like test
 # ============================================================================
 
 @register()
-class CopyPaste(nn.Module):
-    """
-    Depth-ordered two-image copy-paste augmentation.
+class FillSingleClass(nn.Module):
+    """Single-class scene augmentation by duplicating one high-visibility object.
 
-    같은 데이터셋에서 랜덤 이미지 B를 로드, A+B 물체를 tz 기반 depth ordering으로 합성.
-    배경은 A의 비물체 영역 그대로 유지.
+    현재 이미지에서 visibility가 가장 높은 물체 1개를 선택,
+    n_target개로 복제하여 각각 랜덤 rotation/zoom 적용 후 depth-ordered composite.
+    배경 교체는 별도 증강(RandomBackgroundWithPresets)에서 처리.
 
     Args:
-        p: 적용 확률
-        min_visibility: 최종 visibility 필터 임계값
+        min_total: 최종 물체 수 하한
+        max_total: 최종 물체 수 상한
+        min_visibility: composite 후 visibility 하한
+        rotation_range: ±도 범위
+        p_rot180: 180° 추가 회전 확률
+        zoom_min: zoom 하한
+        zoom_max: zoom 상한
         edge_blur_kernel: 엣지 블렌딩 커널 크기
-        max_objects_from_b: B에서 가져올 최대 물체 수 (None이면 전부)
-        min_objects_threshold: A의 물체 수가 이 값 이하일 때만 적용 (None이면 항상)
-        max_total_objects: 합산 최대 물체 수 (None이면 무제한). B에서 가져올 개수를 자동 조절.
     """
 
-    def __init__(self, p=0.5, min_visibility=0.1, edge_blur_kernel=5,
-                 max_objects_from_b=None, min_objects_threshold=None, max_total_objects=None):
+    def __init__(self, min_total=1, max_total=5,
+                 min_visibility=0.7,
+                 rotation_range=30.0, p_rot180=0.5,
+                 zoom_min=0.9, zoom_max=1.1,
+                 edge_blur_kernel=5,
+                 max_attempts=30):
         super().__init__()
-        self.p = p
+        self.min_total = min_total
+        self.max_total = max_total
         self.min_visibility = min_visibility
-        self.edge_blur_kernel = edge_blur_kernel
-        self.max_objects_from_b = max_objects_from_b
-        self.min_objects_threshold = min_objects_threshold
-        self.max_total_objects = max_total_objects
+        self.rotation_range = float(rotation_range)
+        self.p_rot180 = float(p_rot180)
+        self.zoom_min = float(zoom_min)
+        self.zoom_max = float(zoom_max)
+        self.edge_blur_kernel = int(edge_blur_kernel)
+        self.max_attempts = int(max_attempts)
+
+    def _select_source(self, target):
+        """Lightweight eligible object selection (no pixel extraction)."""
+        masks = target["masks"]
+        masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
+        pxa_all = target.get("px_count_all")
+
+        eligible = []
+        for i in range(len(masks_np)):
+            visib_area = float(masks_np[i].sum())
+            pxa = float(pxa_all[i]) if pxa_all is not None else visib_area
+            if pxa > 0 and visib_area / pxa >= self.min_visibility:
+                eligible.append(i)
+        return eligible
 
     def forward(self, *inputs):
         import random
         input_tuple = inputs[0] if len(inputs) == 1 else inputs
 
         if len(input_tuple) >= 3:
-            image_a, target_a, dataset = input_tuple[0], input_tuple[1], input_tuple[2]
+            image, target, dataset = input_tuple[0], input_tuple[1], input_tuple[2]
         else:
             return input_tuple
-
-        if random.random() > self.p:
-            return input_tuple
-        if "masks" not in target_a or "poses" not in target_a:
-            return input_tuple
-        if isinstance(image_a, torch.Tensor):
-            return input_tuple
-
-        # 물체 수가 threshold 이하일 때만 적용
-        if self.min_objects_threshold is not None:
-            n_objects = len(target_a.get("labels", []))
-            if n_objects > self.min_objects_threshold:
-                return input_tuple
-
-        try:
-            idx_b = random.randint(0, len(dataset) - 1)
-            image_b, target_b = dataset.load_item(idx_b)
-        except Exception:
-            return input_tuple
-
-        if image_a.size != image_b.size:
-            return input_tuple
-
-        W, H = image_a.size
-
-        objects_a = _extract_objects(image_a, target_a)
-        objects_b = _extract_objects(image_b, target_b)
-
-        if not objects_a and not objects_b:
-            return input_tuple
-
-        # B에서 가져올 물체 수 제한
-        max_from_b = len(objects_b)
-        if self.max_total_objects is not None:
-            max_from_b = min(max_from_b, max(0, self.max_total_objects - len(objects_a)))
-        if self.max_objects_from_b is not None:
-            max_from_b = min(max_from_b, self.max_objects_from_b)
-        if max_from_b <= 0:
-            return input_tuple
-        if len(objects_b) > max_from_b:
-            objects_b = random.sample(objects_b, max_from_b)
-
-        all_objects = objects_a + objects_b
-        all_objects.sort(key=lambda x: -x["tz"])
-
-        background = np.array(image_a).copy()
-        canvas, occupancy = _depth_composite(all_objects, background, H, W, self.edge_blur_kernel)
-        keep_indices, final_masks = _visibility_filter(all_objects, occupancy, self.min_visibility)
-
-        if not keep_indices:
-            return input_tuple
-
-        merged = _build_target_from_objects(all_objects, keep_indices, final_masks, H, W)
-        if merged is None:
-            return input_tuple
-
-        for k in target_a:
-            if k not in merged:
-                merged[k] = target_a[k]
-
-        return (PILImage.fromarray(canvas), merged, dataset)
-
-
-# ============================================================================
-# RandomTransformAug — per-object Z축 회전 + VOC 배경 + depth ordering
-# ============================================================================
-
-@register()
-class RandomTransformAug(nn.Module):
-    """
-    Per-object Z축 회전 + depth-ordered compositing + 배경 교체.
-
-    각 물체를 visib_mask로 분리 → 개별 회전(±range, 확률적 180° 플립)
-    → tz 기반 depth ordering으로 재합성 → 배경 교체.
-
-    Args:
-        principal_rotation_range: 회전 범위 (도)
-        flip_prob: 180도 추가 회전 확률
-        p: 적용 확률
-        background_dir: 배경 이미지 디렉토리 (None이면 랜덤 단색)
-        min_visibility: visibility 필터 임계값
-        edge_blur_kernel: 엣지 블렌딩 커널 크기
-        max_angle: legacy 파라미터 (principal_rotation_range로 변환)
-    """
-
-    def __init__(
-        self,
-        principal_rotation_range: float = 15.0,
-        flip_prob: float = 0.3,
-        p: float = 0.98,
-        background_dir: Optional[str] = None,
-        min_visibility: float = 0.1,
-        edge_blur_kernel: int = 5,
-        # Legacy parameters
-        max_angle: Optional[float] = None,
-        principal_rotation_flip: bool = False,
-        fallback_for_renderer: bool = False,
-        use_amodal_bbox: bool = True,
-    ) -> None:
-        super().__init__()
-        if max_angle is not None and principal_rotation_range == 15.0:
-            self.rotation_range = max_angle
-        else:
-            self.rotation_range = principal_rotation_range
-        self.flip_prob = flip_prob
-        self.p = p
-        self.min_visibility = min_visibility
-        self.edge_blur_kernel = edge_blur_kernel
-        self.fallback_for_renderer = fallback_for_renderer
-
-        bg_dir = os.path.expanduser(background_dir) if background_dir else None
-        self._background_images = _load_background_list(bg_dir)
-
-    def _rotate_object(self, obj, angle, H, W, cx, cy):
-        """단일 물체를 principal point (cx, cy) 기준으로 Z축 회전.
-
-        카메라 광축 회전과 동일: pixels는 (cx,cy) 기준 회전,
-        pose는 R_new = Rz @ R, t_new = Rz @ t.
-
-        Returns:
-            rotated obj dict 또는 None (visibility 실패)
-        """
-        visib_mask = obj["visib_mask"]
-        full_mask = obj["full_mask"]
-        pixels = obj["pixels"]
-
-        # principal point 기준 회전 행렬
-        rot_mat = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-
-        # 픽셀 & 마스크 회전
-        rot_pixels = cv2.warpAffine(pixels, rot_mat, (W, H), borderValue=(0, 0, 0))
-        rot_visib = cv2.warpAffine(visib_mask, rot_mat, (W, H), flags=cv2.INTER_NEAREST)
-        rot_full = cv2.warpAffine(full_mask, rot_mat, (W, H), flags=cv2.INTER_NEAREST)
-
-        # visibility 체크
-        full_area = rot_full.sum()
-        if full_area == 0:
-            return None
-        vis_area = rot_visib.sum()
-        if vis_area / full_area < self.min_visibility:
-            return None
-
-        # modal bbox (visib_mask 기반) 최소 크기 체크
-        vys, vxs = np.where(rot_visib > 0)
-        if len(vys) == 0:
-            return None
-        if (int(vxs.max()) - int(vxs.min())) < 5 or (int(vys.max()) - int(vys.min())) < 5:
-            return None
-
-        # amodal bbox (full_mask 기반)
-        fys, fxs = np.where(rot_full > 0)
-        if len(fys) == 0:
-            return None
-        new_box = torch.tensor([[fxs.min(), fys.min(), fxs.max(), fys.max()]], dtype=torch.float32)
-
-        # pose 업데이트: R_new = Rz @ R, t_new = Rz @ t
-        pose = obj["pose"].clone()
-        Rz = cv2.Rodrigues(np.array([0, 0, np.deg2rad(-angle)]))[0].astype(np.float32)
-
-        t_old = pose[:3].numpy()
-        R_old = pose[3:].reshape(3, 3).numpy()
-        t_new = Rz @ t_old
-        R_new = Rz @ R_old
-
-        pose[:3] = torch.from_numpy(t_new).float()
-        pose[3:] = torch.from_numpy(R_new.flatten()).float()
-
-        new_obj = {
-            "pixels": rot_pixels,
-            "visib_mask": rot_visib.astype(np.uint8),
-            "full_mask": rot_full.astype(np.uint8),
-            "tz": float(t_new[2]),  # tz는 변하지 않지만 일관성을 위해
-            "pose": pose,
-            "label": obj["label"].clone(),
-            "box": new_box,
-        }
-        if "cam_K" in obj:
-            new_obj["cam_K"] = obj["cam_K"].clone()
-
-        return new_obj
-
-    def forward(self, *inputs):
-        import random
-
-        if self.fallback_for_renderer:
-            input_tuple = inputs[0] if len(inputs) == 1 else inputs
-            if input_tuple[1].get("_renderer_aug_applied", False):
-                return inputs if len(inputs) > 1 else inputs[0]
-
-        if torch.rand(1) >= self.p:
-            return inputs if len(inputs) > 1 else inputs[0]
-
-        input_tuple = inputs[0] if len(inputs) == 1 else inputs
-        image = input_tuple[0]
-        target = input_tuple[1]
-        dataset_info = input_tuple[2] if len(input_tuple) > 2 else None
 
         if "masks" not in target or "poses" not in target:
-            if dataset_info is not None:
-                return (image, target, dataset_info)
-            return (image, target)
-
+            return input_tuple
         if isinstance(image, torch.Tensor):
-            if dataset_info is not None:
-                return (image, target, dataset_info)
-            return (image, target)
+            return input_tuple
+
+        eligible = self._select_source(target)
+        if not eligible:
+            return input_tuple
+        src_idx = random.choice(eligible)
 
         W, H = image.size
+        img_np = np.array(image)
 
-        # cam_K에서 principal point 추출
+        masks = target["masks"]
+        masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
+        src_visib = masks_np[src_idx].astype(np.uint8)
+        src_pixels = img_np.copy()
+        src_pixels[src_visib == 0] = 0
+
+        full_masks = target.get("full_masks")
+        fm_np = full_masks.numpy() if torch.is_tensor(full_masks) else np.array(full_masks)
+        src_full = fm_np[src_idx].astype(np.uint8) if full_masks is not None else src_visib.copy()
+
+        poses_data = target["poses"].data if hasattr(target["poses"], 'data') else target["poses"]
+        src_t = poses_data[src_idx, :3].numpy().astype(np.float32)
+        src_R = poses_data[src_idx, 3:].numpy().reshape(3, 3).astype(np.float32)
+        src_label = target["labels"][src_idx:src_idx+1].clone()
+
+        pxa_all = target.get("px_count_all")
+        src_pxa = float(pxa_all[src_idx]) if pxa_all is not None else float(src_visib.sum())
+
         cam_K = target.get("cam_K")
         if cam_K is not None:
-            cam_K_np = cam_K[0].numpy() if len(cam_K.shape) > 1 else cam_K.numpy()
-            cx, cy = float(cam_K_np[2]), float(cam_K_np[5])
+            cam_K_np = cam_K[0].numpy() if cam_K.dim() > 1 else cam_K.numpy()
+            # image-plane 회전·zoom 중심은 현재 image (W, H) 좌표계의 진짜 주점이어야 함.
+            # 원본 cam_K(=orig_size 기준)에 image scale ratio를 곱해서 cx, cy로만 사용.
+            # src_cam_K는 원본 그대로 보관 — pose 라벨/criterion/추론 좌표계는 원본 K 유지.
+            # FILLSINGLE_DISABLE_K_CORRECT=1 환경변수로 보정 비활성화 (디버그/비교용)
+            if os.environ.get("FILLSINGLE_DISABLE_K_CORRECT") == "1":
+                sx, sy = 1.0, 1.0
+            else:
+                orig_size = target.get("orig_size")
+                if orig_size is not None:
+                    sx = W / float(orig_size[0])
+                    sy = H / float(orig_size[1])
+                else:
+                    sx, sy = 1.0, 1.0
+            cx = float(cam_K_np[2]) * sx
+            cy = float(cam_K_np[5]) * sy
+            src_cam_K = cam_K[src_idx:src_idx+1].clone() if cam_K.dim() > 1 else cam_K.unsqueeze(0).clone()
         else:
             cx, cy = W / 2.0, H / 2.0
+            src_cam_K = None
 
-        # 물체 추출
-        objects = _extract_objects(image, target)
-        if not objects:
-            if dataset_info is not None:
-                return (image, target, dataset_info)
-            return (image, target)
+        boxes = target.get("boxes")
+        src_box = boxes.data[src_idx:src_idx+1].clone() if boxes is not None else None
 
-        # Per-object 회전 (principal point 기준)
-        rotated_objects = []
-        for obj in objects:
-            # 회전 각도: ±range + 확률적 180° 플립
-            delta = np.random.uniform(-self.rotation_range, self.rotation_range)
-            if random.random() < self.flip_prob:
-                delta += 180.0
-            angle = delta
+        n_target = random.randint(self.min_total, self.max_total)
 
-            rot_obj = self._rotate_object(obj, angle, H, W, cx, cy)
-            if rot_obj is not None:
-                rotated_objects.append(rot_obj)
-            else:
-                # 회전 후 visibility 실패 → 원본 유지
-                rotated_objects.append(obj)
+        # Phase 0: 소스 물체 자체를 첫 번째 후보로 확보 (실패 방지)
+        base_candidate = (float(src_visib.sum()) / max(src_pxa, 1),
+                          src_visib, 0.0, 1.0,
+                          np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64))
 
-        # tz 기준 depth ordering
-        rotated_objects.sort(key=lambda x: -x["tz"])
+        # Phase 1: visib_mask만 warp → 가시성 체크 (cheap)
+        light_candidates = []
+        for _ in range(self.max_attempts):
+            angle = random.uniform(-self.rotation_range, self.rotation_range)
+            if random.random() < self.p_rot180:
+                angle += 180.0
+            scale = random.uniform(self.zoom_min, self.zoom_max)
 
-        # 배경 이미지
-        background = _load_background_image(self._background_images, H, W)
+            M = cv2.getRotationMatrix2D((cx, cy), angle, scale)
+            new_visib = cv2.warpAffine(src_visib, M, (W, H), flags=cv2.INTER_NEAREST, borderValue=0)
 
-        # Depth-ordered compositing
-        canvas, occupancy = _depth_composite(rotated_objects, background, H, W, self.edge_blur_kernel)
-        keep_indices, final_masks = _visibility_filter(rotated_objects, occupancy, self.min_visibility)
+            new_pxa = src_pxa * scale * scale
+            if new_pxa > 0 and new_visib.sum() / new_pxa < self.min_visibility:
+                continue
+
+            vis_ratio = float(new_visib.sum()) / max(new_pxa, 1)
+            light_candidates.append((vis_ratio, new_visib, angle, scale, M))
+
+        # Phase 2: greedy 비겹침 선택 (mask boolean만)
+        light_candidates.append(base_candidate)
+        light_candidates.sort(key=lambda x: -x[0])
+        chosen = []
+        occupancy = np.zeros((H, W), dtype=bool)
+        for vis_ratio, new_visib, angle, scale, M in light_candidates:
+            if len(chosen) >= n_target:
+                break
+            mask = new_visib > 0
+            visible = float(mask.sum()) - float((mask & occupancy).sum())
+            new_pxa = src_pxa * scale * scale
+            if new_pxa > 0 and visible / new_pxa < self.min_visibility:
+                continue
+            chosen.append((new_visib, angle, scale, M))
+            occupancy |= mask
+
+        # Phase 3: 선택된 것만 pixels + full_mask warp + pose 계산 (expensive)
+        candidates = []
+        for new_visib, angle, scale, M in chosen:
+            new_pixels = cv2.warpAffine(src_pixels, M, (W, H), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
+            new_full = cv2.warpAffine(src_full, M, (W, H), flags=cv2.INTER_NEAREST, borderValue=0)
+            new_pxa = src_pxa * scale * scale
+
+            angle_rad = np.deg2rad(angle)
+            c, s = np.cos(-angle_rad), np.sin(-angle_rad)
+            Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
+            t_new = Rz @ src_t
+            t_new[2] /= scale
+            R_new = Rz @ src_R
+
+            ys, xs = np.nonzero(new_full > 0)
+            if len(xs) == 0:
+                continue
+            new_box = torch.tensor([[xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]], dtype=torch.float32)
+
+            candidates.append({
+                "pixels": new_pixels,
+                "visib_mask": new_visib,
+                "full_mask": new_full,
+                "px_count_all": new_pxa,
+                "pose": torch.from_numpy(np.concatenate([t_new, R_new.reshape(9)])).float(),
+                "tz": float(t_new[2]),
+                "label": src_label.clone(),
+                "box": new_box,
+                "cam_K": src_cam_K.clone() if src_cam_K is not None else None,
+            })
+
+        if not candidates:
+            return input_tuple
+
+        candidates.sort(key=lambda x: -x["tz"])
+
+        background = np.zeros((H, W, 3), dtype=np.uint8)
+        canvas, occ_map = _depth_composite(candidates, background, H, W, self.edge_blur_kernel)
+        keep_indices, final_masks = _visibility_filter(candidates, occ_map, self.min_visibility)
 
         if not keep_indices:
-            # 모든 물체가 사라지면 원본 반환
-            if dataset_info is not None:
-                return (image, target, dataset_info)
-            return (image, target)
+            return input_tuple
 
-        merged = _build_target_from_objects(rotated_objects, keep_indices, final_masks, H, W)
+        merged = _build_target_from_objects(candidates, keep_indices, final_masks, H, W)
         if merged is None:
-            if dataset_info is not None:
-                return (image, target, dataset_info)
-            return (image, target)
+            return input_tuple
 
-        # 원본 target에서 추가 필드 복사
         for k in target:
             if k not in merged:
                 merged[k] = target[k]
 
-        merged["_geometric_aug_applied"] = True
-        result_image = PILImage.fromarray(canvas)
-
-        if dataset_info is not None:
-            return (result_image, merged, dataset_info)
-        return (result_image, merged)
-
-
+        return (PILImage.fromarray(canvas), merged, dataset)
 @register()
 class FilterSmallBoxLowVis(nn.Module):
-    """Modal bbox 최소 크기 + dynamic visibility 필터.
+    """Modal bbox 최소 크기 + visibility 필터 (BOP visib_fract 기준).
 
-    Augmentation 이후 위치에 두면 zoom/crop/dropout으로 가려진 결과까지 반영해
-    필터링된다. Visibility는 다음 우선순위로 계산:
+    `target['visibility']`를 그대로 사용. 기하 증강(PoseAugmentation 등)이
+    각자 visibility를 재계산해주는 책임을 가지므로 filter는 단순히 임계값
+    비교만 수행. coco_dataset.py가 어노테이션의 BOP visib_fract를 그대로
+    `target['visibility']`에 저장 → BOP eval과 정합.
 
-      1) **Dynamic** (권장): PLY 모델에서 FPS 샘플한 점들을 현재 pose+cam_K로
-         이미지에 투영하여 visible mask 안에 들어간 비율. coco_path /
-         category_file이 주어졌을 때 활성화.
-      2) Amodal mask 면적 비율 (`amodal_masks` / `full_masks`).
-      3) Annotation의 `visibility` 필드 (BOP 정적 값).
-
-    `coco_path`/`category_file`이 비어있거나 PLY 로딩 실패 시 자동으로 (2)→(3)
-    fallback. 따라서 ignore=True 분기를 dataset에서 제거해도 동등한 supervision
-    필터링이 학습 단에서 보장된다.
+    visibility가 target에 없으면 1.0으로 가정 (필터 안 함).
     """
 
     def __init__(
         self,
         min_size: int = 5,
         min_visib: float = 0.0,
-        coco_path: Optional[str] = None,
-        category_file: Optional[str] = None,
-        num_fps_points: int = 1000,
+        **deprecated_kwargs,
     ):
         super().__init__()
-        self.min_size = min_size
-        self.min_visib = min_visib
-        self.num_fps_points = int(num_fps_points)
-
-        # {label_id (post-remap, 0-indexed): np.ndarray [N, 3] in mm}
-        self._fps_cache: Dict[int, np.ndarray] = {}
-        # {label_id: diameter in mm} — for tz<d/2 pre-filter (object intersects
-        # near plane → some FPS pts have Z<0, projection unstable).
-        self._diameter_cache: Dict[int, float] = {}
-        if coco_path and category_file:
-            self._load_fps_models(coco_path, category_file, self.num_fps_points)
-            self._load_diameters(coco_path, category_file)
-
-    def _load_fps_models(self, coco_path: str, category_file: str, num_pts: int) -> None:
-        try:
-            import yaml
-            import hashlib
-        except Exception as exc:
-            print(f"[FilterSmallBoxLowVis] dynamic vis disabled (import failed: {exc})")
-            return
-
-        coco_path_exp = os.path.expanduser(coco_path)
-        cat_path = os.path.expanduser(category_file)
-        models_dir = os.path.join(coco_path_exp, "models")
-        if not (os.path.isdir(models_dir) and os.path.isfile(cat_path)):
-            print("[FilterSmallBoxLowVis] dynamic vis disabled (missing models dir or category file)")
-            return
-
-        # Disk cache: key on (models_dir abs path, category_file abs path, num_pts).
-        # PLY 파일 mtime까지 합쳐 변경 감지.
-        ply_paths = sorted(
-            [os.path.join(models_dir, fn) for fn in os.listdir(models_dir) if fn.endswith(".ply")]
-        )
-        ply_mtimes = ",".join(f"{os.path.basename(p)}:{os.path.getmtime(p):.0f}" for p in ply_paths)
-        key = f"{os.path.abspath(models_dir)}|{os.path.abspath(cat_path)}|{num_pts}|{ply_mtimes}"
-        digest = hashlib.sha1(key.encode()).hexdigest()[:16]
-        cache_dir = os.path.expanduser("~/.cache/race6d/fps_models")
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_path = os.path.join(cache_dir, f"fps_{digest}.pt")
-
-        if os.path.isfile(cache_path):
-            try:
-                self._fps_cache = torch.load(cache_path, weights_only=False)
-                print(
-                    f"[FilterSmallBoxLowVis] dynamic vis enabled: loaded {len(self._fps_cache)} "
-                    f"models from cache ({cache_path})"
-                )
-                return
-            except Exception as exc:
-                print(f"[FilterSmallBoxLowVis] cache load failed ({exc}), recomputing...")
-
-        try:
-            import open3d as o3d  # type: ignore[import-not-found]
-            from pytorch3d.ops import sample_farthest_points  # type: ignore[import-not-found]
-        except Exception as exc:
-            print(f"[FilterSmallBoxLowVis] dynamic vis disabled (import failed: {exc})")
-            return
-
-        with open(cat_path, "r") as f:
-            cat = yaml.safe_load(f).get("category2name", {})
-
-        loaded = 0
-        for label_id, cat_id in enumerate(cat.keys()):
-            ply_path = os.path.join(models_dir, f"obj_{int(cat_id):06d}.ply")
-            if not os.path.isfile(ply_path):
-                continue
-            try:
-                pcd = o3d.io.read_point_cloud(ply_path)
-                pts = np.asarray(pcd.points, dtype=np.float32)
-                if pts.shape[0] == 0:
-                    continue
-                if pts.shape[0] > num_pts:
-                    pts_t = torch.from_numpy(pts).unsqueeze(0)
-                    sampled, _ = sample_farthest_points(pts_t, K=num_pts)
-                    pts = sampled.squeeze(0).numpy().astype(np.float32)
-                self._fps_cache[label_id] = pts
-                loaded += 1
-            except Exception as exc:
-                print(f"[FilterSmallBoxLowVis] failed to load {ply_path}: {exc}")
-
-        if loaded > 0:
-            try:
-                torch.save(self._fps_cache, cache_path)
-                print(
-                    f"[FilterSmallBoxLowVis] dynamic vis enabled: {loaded} models, "
-                    f"{num_pts} FPS pts each (cached → {cache_path})"
-                )
-            except Exception as exc:
-                print(f"[FilterSmallBoxLowVis] cache save failed ({exc}), continuing without cache")
-
-    def _load_diameters(self, coco_path: str, category_file: str) -> None:
-        """Load per-class diameter (mm) from BOP `models_info.json`."""
-        try:
-            import yaml, json
-        except Exception:
-            return
-        coco_path_exp = os.path.expanduser(coco_path)
-        cat_path = os.path.expanduser(category_file)
-        info_path = os.path.join(coco_path_exp, "models", "models_info.json")
-        if not (os.path.isfile(cat_path) and os.path.isfile(info_path)):
-            return
-        with open(cat_path, "r") as f:
-            cat = yaml.safe_load(f).get("category2name", {})
-        with open(info_path, "r") as f:
-            info = json.load(f)
-        for label_id, cat_id in enumerate(cat.keys()):
-            entry = info.get(str(int(cat_id))) or info.get(int(cat_id))
-            if entry and "diameter" in entry:
-                self._diameter_cache[label_id] = float(entry["diameter"])
-
-    def _compute_dynamic_visib(
-        self, target: Dict[str, Any], masks_np: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """PLY 점을 pose+K로 투영해서 visible mask 안에 든 비율을 instance별로 계산.
-
-        반환 [N]: 모델이 로드된 instance는 [0,1] 비율, 안 된 instance는 NaN.
-        """
-        if not self._fps_cache:
-            return None
-
-        poses = target.get("poses")
-        cam_K = target.get("cam_K")
-        labels = target.get("labels")
-        if poses is None or cam_K is None or labels is None:
-            return None
-
-        poses_data = poses.data if hasattr(poses, "data") else poses
-        poses_np = (
-            poses_data.numpy() if torch.is_tensor(poses_data) else np.asarray(poses_data)
-        )
-        cam_K_np = cam_K.numpy() if torch.is_tensor(cam_K) else np.asarray(cam_K)
-        labels_np = labels.numpy() if torch.is_tensor(labels) else np.asarray(labels)
-
-        N = masks_np.shape[0]
-        H, W = masks_np.shape[1], masks_np.shape[2]
-        vis = np.full(N, np.nan, dtype=np.float32)
-
-        for i in range(N):
-            label_id = int(labels_np[i])
-            pts = self._fps_cache.get(label_id)
-            if pts is None:
-                continue  # NaN → fallback path takes over
-
-            pose_i = poses_np[i].reshape(-1)
-            t = pose_i[:3].astype(np.float32)
-
-            # Pre-filter: tz < diameter/2 means object intersects camera near plane.
-            # Some FPS pts will have Z<0 → projection ill-defined. Mark vis=0 (filter).
-            diameter = self._diameter_cache.get(label_id)
-            if diameter is not None and float(t[2]) < 0.5 * diameter:
-                vis[i] = 0.0
-                continue
-
-            R = pose_i[3:12].reshape(3, 3).astype(np.float32)
-            K = (
-                cam_K_np[i].reshape(3, 3) if cam_K_np.ndim > 1 else cam_K_np.reshape(3, 3)
-            ).astype(np.float32)
-
-            X_cam = pts @ R.T + t  # [N_pts, 3] in mm
-            Z = X_cam[:, 2]
-            valid = Z > 1e-3
-            if not valid.any():
-                vis[i] = 0.0
-                continue
-
-            # Z 1mm 하한: tz<d/2 케이스를 위에서 걸렀으므로 Z>0 가 보장되지만
-            # 수치 안전을 위해 1mm 클램프 (int32 cast 안전 범위 보장).
-            Z_safe = np.maximum(Z, 1.0)
-            u = K[0, 0] * X_cam[:, 0] / Z_safe + K[0, 2]
-            v = K[1, 1] * X_cam[:, 1] / Z_safe + K[1, 2]
-            ui = np.floor(u + 0.5).astype(np.int32)
-            vi = np.floor(v + 0.5).astype(np.int32)
-            in_img = valid & (ui >= 0) & (ui < W) & (vi >= 0) & (vi < H)
-            if not in_img.any():
-                vis[i] = 0.0
-                continue
-
-            mask = masks_np[i] > 0
-            n_inside = int(mask[vi[in_img], ui[in_img]].sum())
-            vis[i] = n_inside / max(pts.shape[0], 1)
-
-        return vis
+        self.min_size = int(min_size)
+        self.min_visib = float(min_visib)
+        if deprecated_kwargs:
+            ignored = ", ".join(deprecated_kwargs.keys())
+            print(
+                f"[FilterSmallBoxLowVis] deprecated kwargs ignored: {ignored}. "
+                "Filter now relies on target['visibility'] (updated by aug ops)."
+            )
 
     def forward(self, *inputs):
         input_tuple = inputs[0] if len(inputs) == 1 else inputs
@@ -2835,47 +3040,33 @@ class FilterSmallBoxLowVis(nn.Module):
             return (image, target)
 
         masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
-        N = masks_np.shape[0]
-        H, W = masks_np.shape[1], masks_np.shape[2]
+        if masks_np.ndim != 3 or masks_np.shape[0] == 0:
+            if dataset_info is not None:
+                return (image, target, dataset_info)
+            return (image, target)
+        N, H, W = masks_np.shape
 
-        # Vectorized bbox-size check.
-        # `np.any` works directly on integer masks (0 → False, nonzero → True),
-        # so we avoid the [N,H,W] boolean materialization that `masks_np > 0` does.
-        y_any = masks_np.any(axis=2)                  # [N, H]
-        x_any = masks_np.any(axis=1)                  # [N, W]
-        has_any = y_any.any(axis=1)                   # [N]
-
-        # First / last True column via argmax. argmax on all-False rows returns 0,
-        # which is harmless because `has_any` masks those instances to width=height=0.
+        # Vectorized bbox-size check on visible mask.
+        y_any = masks_np.any(axis=2)
+        x_any = masks_np.any(axis=1)
+        has_any = y_any.any(axis=1)
         x_min = x_any.argmax(axis=1)
         x_max = (W - 1) - x_any[:, ::-1].argmax(axis=1)
         y_min = y_any.argmax(axis=1)
         y_max = (H - 1) - y_any[:, ::-1].argmax(axis=1)
         widths = np.where(has_any, x_max - x_min, 0)
         heights = np.where(has_any, y_max - y_min, 0)
-
         size_ok = (widths >= self.min_size) & (heights >= self.min_size) & has_any
 
-        # Visibility: dynamic (PLY 투영) 1순위, 실패한 instance는 ann visibility로 fallback.
-        dyn_vis = self._compute_dynamic_visib(target, masks_np) if self.min_visib > 0 else None
-
-        ann_visib = None
+        # Visibility check (target['visibility'] 직접 사용; 기하 증강이 갱신).
         if self.min_visib > 0:
             v = target.get("visibility")
-            if v is not None:
-                ann_visib = v.numpy() if torch.is_tensor(v) else np.asarray(v)
-
-        if self.min_visib > 0:
-            visib_fract = np.full(N, np.nan, dtype=np.float32)
-            if dyn_vis is not None:
-                visib_fract = np.where(np.isnan(dyn_vis), visib_fract, dyn_vis)
-            if ann_visib is not None:
-                use_ann = np.isnan(visib_fract) & (np.arange(N) < len(ann_visib))
-                if use_ann.any():
-                    visib_fract = np.where(use_ann, ann_visib[:N], visib_fract)
-            # NaN remaining → no source available, treat as visible (no filter)
-            visib_fract = np.where(np.isnan(visib_fract), 1.0, visib_fract)
-            visib_ok = visib_fract >= self.min_visib
+            if v is None:
+                visib_ok = np.ones(N, dtype=bool)
+            else:
+                arr = v.numpy() if torch.is_tensor(v) else np.asarray(v)
+                visib = np.clip(arr.astype(np.float32, copy=False), 0.0, 1.0)
+                visib_ok = visib >= self.min_visib
         else:
             visib_ok = np.ones(N, dtype=bool)
 
@@ -2886,18 +3077,16 @@ class FilterSmallBoxLowVis(nn.Module):
                 return (image, target, dataset_info)
             return (image, target)
 
+        # 모두 fail이면 target 유지 (criterion이 비어있는 상태 잘 처리하도록).
         if not keep.any():
             if dataset_info is not None:
                 return (image, target, dataset_info)
             return (image, target)
 
-        # Explicit whitelist of per-object fields so we never collide with
-        # fixed-shape metadata like orig_size ([W, H], shape [2]) when a sample
-        # happens to have the same number of GTs as the metadata length.
         per_object_keys = {
             "boxes", "masks", "full_masks", "amodal_masks",
             "labels", "poses", "cam_K", "visibility",
-            "area", "iscrowd",
+            "area", "iscrowd", "px_count_all",
         }
         filtered = {}
         for k, v in target.items():
@@ -2907,7 +3096,9 @@ class FilterSmallBoxLowVis(nn.Module):
                 and v.shape[0] == len(keep)
             ):
                 if isinstance(v, BoundingBoxes):
-                    filtered[k] = BoundingBoxes(v.data[keep], format=v.format, canvas_size=v.canvas_size)
+                    filtered[k] = BoundingBoxes(
+                        v.data[keep], format=v.format, canvas_size=v.canvas_size
+                    )
                 elif isinstance(v, Mask):
                     filtered[k] = Mask(v[keep])
                 elif isinstance(v, Pose):
@@ -2920,6 +3111,7 @@ class FilterSmallBoxLowVis(nn.Module):
         if dataset_info is not None:
             return (image, filtered, dataset_info)
         return (image, filtered)
+
 
 @register()
 class BackgroundReplacement:
@@ -3478,3 +3670,647 @@ except ImportError:
 _OPEN3D_AVAILABLE = (
     False  # Open3D removed: Embree deadlocks under fork()-based DataLoader
 )
+
+
+# ============================================================================
+# CopyPasteSingleClass — cross-image same-class CopyPaste with VOC background
+# ============================================================================
+# 1) 현재 image A에서 한 class 선택 (visibility >= min_visibility 필터 통과한
+#    instance 중 1개 = source).
+# 2) 다른 image들에서 동일 class instance candidate K개 수집.
+# 3) candidate를 visibility 내림차순으로 정렬한 뒤 source 및 이미 선택된
+#    instance의 visib_mask와 겹침이 적은 순서로 source 외 2~4개 greedy 선택.
+# 4) source + 추가 N개를 VOC 배경 위에 depth-ordered composite. 각 instance의
+#    pose/cam_K는 원본 그대로 (회전·zoom 변환 없음 — cross-image라 자연 viewpoint).
+# 5) 결과: 동일 class 3~5개 image. val(test_eval) single-class scene 분포 매칭.
+
+@register()
+class CopyPasteSingleClass(nn.Module):
+    """Cross-image same-class CopyPaste with VOC background.
+
+    Args:
+        voc_root: VOC2012 JPEGImages (또는 임의 background) 디렉토리.
+            None이면 random 단색 fallback.
+        p: 적용 확률.
+        min_extra, max_extra: source 외 추가할 instance 수 (기본 2~4 → 총 3~5).
+        candidate_pool_size: 다른 image에서 미리 모을 same-class 후보 수.
+        min_visibility: source/candidate 필터 + composite 후 visibility 필터.
+        max_attempts: candidate 수집 시 최대 image sampling 시도.
+        edge_blur_kernel: composite 엣지 블렌딩 커널 (0=hard edge).
+    """
+
+    def __init__(
+        self,
+        voc_root: str = None,
+        p: float = 0.5,
+        min_extra: int = 2,
+        max_extra: int = 4,
+        candidate_pool_size: int = 16,
+        min_visibility: float = 0.1,
+        max_bbox_iou: float = 1.0,    # bbox IoU 임계값. >이면 reject. 1.0=disabled
+        max_attempts: int = 30,
+        edge_blur_kernel: int = 0,
+        cc_textures_dir: str = None,
+        cc_industrial_only: bool = True,
+        cc_bg_prob: float = 1.0,
+        cc_cache_dir: str = None,
+    ):
+        super().__init__()
+        self.voc_root = os.path.expanduser(voc_root) if voc_root else None
+        self.p = float(p)
+        self.min_extra = int(min_extra)
+        self.max_extra = int(max_extra)
+        self.candidate_pool_size = int(candidate_pool_size)
+        self.min_visibility = float(min_visibility)
+        self.max_bbox_iou = float(max_bbox_iou)
+        self.max_attempts = int(max_attempts)
+        self.edge_blur_kernel = int(edge_blur_kernel)
+        self._voc_paths = None
+        self.cc_textures_dir = cc_textures_dir
+        self.cc_industrial_only = bool(cc_industrial_only)
+        self.cc_bg_prob = float(cc_bg_prob)
+        self._cc_paths = None
+        # mmap cache
+        self.cc_cache_dir = os.path.expanduser(cc_cache_dir) if cc_cache_dir else None
+        self._cc_cache_color = None
+        self._cc_cache_normal = None
+        self._cc_cache_rough = None
+        self._cc_cache_size = 0
+
+    def _voc_list(self):
+        if self._voc_paths is None:
+            self._voc_paths = (
+                _load_background_list(self.voc_root) if self.voc_root else []
+            )
+        return self._voc_paths
+
+    def _cc_texture_list(self):
+        if self._cc_paths is None:
+            if not self.cc_textures_dir:
+                self._cc_paths = []
+                return self._cc_paths
+            root = os.path.expanduser(self.cc_textures_dir)
+            if not os.path.isdir(root):
+                self._cc_paths = []
+                return self._cc_paths
+            industrial_prefixes = (
+                'Metal', 'DiamondPlate', 'SheetMetal', 'CorrugatedSteel',
+                'MetalPlates', 'MetalWalkway', 'PaintedMetal',
+                'Concrete', 'ConcreteB', 'ConcreteC', 'ConcreteD',
+                'Rust', 'Tiles', 'RoofingTiles',
+            )
+            all_dirs = sorted(os.listdir(root))
+            if self.cc_industrial_only:
+                keep = []
+                for d in all_dirs:
+                    stem = ''.join(c for c in d if not c.isdigit())
+                    if stem in industrial_prefixes:
+                        keep.append(d)
+                paths = [os.path.join(root, d) for d in keep]
+            else:
+                paths = [os.path.join(root, d) for d in all_dirs
+                         if os.path.isdir(os.path.join(root, d))]
+            valid = []
+            for p in paths:
+                if not os.path.isdir(p):
+                    continue
+                color_files = [f for f in os.listdir(p) if f.endswith('_Color.jpg')]
+                if color_files:
+                    valid.append(p)
+            self._cc_paths = valid
+        return self._cc_paths
+
+    def _cc_cache_load(self) -> bool:
+        """Lazy-load mmap cache. Returns True if cache is available."""
+        if self._cc_cache_color is not None:
+            return True
+        if not self.cc_cache_dir:
+            return False
+        color_path = os.path.join(self.cc_cache_dir, 'cc_cache_color.npy')
+        if not os.path.exists(color_path):
+            return False
+        try:
+            self._cc_cache_color = np.load(color_path, mmap_mode='r')
+            self._cc_cache_normal = np.load(
+                os.path.join(self.cc_cache_dir, 'cc_cache_normal.npy'), mmap_mode='r'
+            )
+            self._cc_cache_rough = np.load(
+                os.path.join(self.cc_cache_dir, 'cc_cache_rough.npy'), mmap_mode='r'
+            )
+            self._cc_cache_size = self._cc_cache_color.shape[0]
+            return True
+        except Exception:
+            self._cc_cache_color = None
+            return False
+
+    def _synth_cc_lite_bg(self, H, W):
+        """V_cc_lite: PBR-lite shaded cc_texture + sigma=1 blur + brightness shift.
+
+        Uses mmap cache (cc_cache_dir) when available for near-zero JPEG decode
+        overhead. Falls back to per-call JPEG loading when cache is absent.
+        """
+        import random as _rng
+        from scipy.ndimage import gaussian_filter
+
+        if self._cc_cache_load():
+            # --- Fast path: mmap cache ---
+            tex_id = _rng.randrange(self._cc_cache_size)
+            color_full = self._cc_cache_color[tex_id]   # (2048, 2048) uint8
+            normal_full = self._cc_cache_normal[tex_id]  # (2048, 2048, 3) uint8
+            rough_full = self._cc_cache_rough[tex_id]    # (2048, 2048) uint8
+
+            src_h, src_w = color_full.shape
+            if src_w > W and src_h > H:
+                x = _rng.randint(0, src_w - W)
+                y = _rng.randint(0, src_h - H)
+                # np.asarray copies the mmap slice into a contiguous array
+                color_arr = np.asarray(color_full[y:y + H, x:x + W]).astype(np.float32)
+                normal_crop = np.asarray(normal_full[y:y + H, x:x + W])
+                rough_arr = np.asarray(rough_full[y:y + H, x:x + W]).astype(np.float32) / 255.0
+            else:
+                # Resize fallback (rare: only if cache was built at smaller size)
+                color_arr = np.asarray(
+                    PILImage.fromarray(np.asarray(color_full)).resize((W, H), PILImage.BILINEAR)
+                ).astype(np.float32)
+                normal_crop = np.asarray(
+                    PILImage.fromarray(np.asarray(normal_full)).resize((W, H), PILImage.BILINEAR)
+                )
+                rough_arr = np.asarray(
+                    PILImage.fromarray(np.asarray(rough_full)).resize((W, H), PILImage.BILINEAR)
+                ).astype(np.float32) / 255.0
+
+            n = (normal_crop.astype(np.float32) / 127.5) - 1.0
+            n_norm = np.linalg.norm(n, axis=2, keepdims=True) + 1e-6
+            n = n / n_norm
+            rough = rough_arr
+
+        else:
+            # --- Slow path: per-call JPEG decode (backward compat) ---
+            paths = self._cc_texture_list()
+            if not paths:
+                return self._synth_gray_bg(H, W)
+
+            tex_dir = _rng.choice(paths)
+            files = os.listdir(tex_dir)
+            color_file = next((f for f in files if f.endswith('_Color.jpg')), None)
+            if not color_file:
+                return self._synth_gray_bg(H, W)
+
+            color_img = PILImage.open(os.path.join(tex_dir, color_file)).convert('L')
+
+            normal_file = next((f for f in files if 'NormalGL' in f), None)
+            normal_img = (
+                PILImage.open(os.path.join(tex_dir, normal_file)).convert('RGB')
+                if normal_file else None
+            )
+
+            rough_file = next((f for f in files if 'Roughness' in f), None)
+            rough_img = (
+                PILImage.open(os.path.join(tex_dir, rough_file)).convert('L')
+                if rough_file else None
+            )
+
+            src_w, src_h = color_img.size
+            if src_w > W and src_h > H:
+                x = _rng.randint(0, src_w - W)
+                y = _rng.randint(0, src_h - H)
+                color_img = color_img.crop((x, y, x + W, y + H))
+                if normal_img:
+                    normal_img = normal_img.crop((x, y, x + W, y + H))
+                if rough_img:
+                    rough_img = rough_img.crop((x, y, x + W, y + H))
+            else:
+                color_img = color_img.resize((W, H), PILImage.BILINEAR)
+                if normal_img:
+                    normal_img = normal_img.resize((W, H), PILImage.BILINEAR)
+                if rough_img:
+                    rough_img = rough_img.resize((W, H), PILImage.BILINEAR)
+
+            color_arr = np.array(color_img).astype(np.float32)
+
+            if normal_img:
+                n = (np.array(normal_img).astype(np.float32) / 127.5) - 1.0
+                n_norm = np.linalg.norm(n, axis=2, keepdims=True) + 1e-6
+                n = n / n_norm
+            else:
+                n = np.zeros((H, W, 3), dtype=np.float32)
+                n[..., 2] = 1.0
+
+            if rough_img:
+                rough = np.array(rough_img).astype(np.float32) / 255.0
+            else:
+                rough = np.full((H, W), 0.5, dtype=np.float32)
+
+        # --- Shared PBR-lite shading (identical for both paths) ---
+        light_dir = np.array([
+            _rng.uniform(-0.5, 0.5),
+            _rng.uniform(-0.5, 0.5),
+            _rng.uniform(0.5, 1.0),
+        ], dtype=np.float32)
+        light_dir = light_dir / np.linalg.norm(light_dir)
+
+        diffuse = np.clip(np.dot(n, light_dir), 0, 1)
+        spec_strength = 1.0 - rough
+        specular = spec_strength * np.power(diffuse, 16)
+
+        ambient = _rng.uniform(0.15, 0.35)
+        diff_w = _rng.uniform(0.5, 0.7)
+        spec_w = _rng.uniform(0.1, 0.3)
+
+        color_n = color_arr / 255.0
+        shaded = (ambient + diff_w * diffuse) * color_n + spec_w * specular
+        shaded = np.clip(shaded * 255, 0, 255)
+
+        shaded = gaussian_filter(shaded, sigma=1.0)
+
+        target_mean = _rng.uniform(30, 50)
+        shift = target_mean - shaded.mean()
+        shaded = np.clip(shaded + shift, 5, 90)
+
+        bg = np.stack([shaded, shaded, shaded], axis=-1).astype(np.uint8)
+        return bg
+
+    @staticmethod
+    def _synth_gray_bg(H, W):
+        """ITODD test_real-style BG with controlled diversity.
+
+        Stats: mean ~40 (TEST matched), range 3-83 (slightly wider than TEST).
+          - 90% grayscale (R=G=B), 10% per-channel colored
+          - base brightness: uniform [10, 70] (test_real mean 40 위주)
+          - gradient mode (random):
+              50% linear (random 2D direction, ±20)
+              30% radial (random center, distance-based, ±25)
+              20% spotlight (random gaussian peak, ±30)
+          - per-pixel Gaussian noise: N(0, 12) — test_real std matched
+        """
+        import random as _rng
+        # Base color
+        if _rng.random() < 0.1:
+            base = np.random.uniform(10, 70, size=3).astype(np.float32)   # colored
+        else:
+            base = np.full(3, np.random.uniform(10, 70), dtype=np.float32)  # grayscale
+        bg = np.full((H, W, 3), base, dtype=np.float32)
+        yy, xx = np.meshgrid(
+            np.linspace(-1, 1, H), np.linspace(-1, 1, W), indexing="ij"
+        )
+        # Gradient mode
+        mode = _rng.random()
+        if mode < 0.5:
+            # Linear: random direction
+            ax = float(np.random.uniform(-20, 20))
+            ay = float(np.random.uniform(-20, 20))
+            bg += (yy * ay + xx * ax)[..., None]
+        elif mode < 0.8:
+            # Radial: random center, distance-based (center-out or vignette)
+            cy = float(np.random.uniform(-0.5, 0.5))
+            cx = float(np.random.uniform(-0.5, 0.5))
+            r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+            amp = float(np.random.uniform(-25, 25))
+            bg += (r * amp)[..., None]
+        else:
+            # Spotlight: random position gaussian peak
+            cy = float(np.random.uniform(-0.7, 0.7))
+            cx = float(np.random.uniform(-0.7, 0.7))
+            sigma = float(np.random.uniform(0.3, 0.8))
+            spot = np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma ** 2))
+            amp = float(np.random.uniform(-30, 30))
+            bg += (spot * amp)[..., None]
+        # Per-pixel noise
+        bg += np.random.normal(0, 12, size=(H, W, 3))
+        return np.clip(bg, 0, 255).astype(np.uint8)
+
+    def forward(self, *inputs):
+        import random
+        sample = inputs[0] if len(inputs) == 1 else inputs
+        if not isinstance(sample, (list, tuple)) or len(sample) < 3:
+            return sample
+        image, target, dataset = sample[0], sample[1], sample[2]
+
+        if random.random() > self.p:
+            return sample
+        if not isinstance(image, PILImage.Image):
+            return sample
+        if "masks" not in target or "labels" not in target or "poses" not in target:
+            return sample
+
+        masks = target["masks"]
+        masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
+        labels = target["labels"]
+        pxa_all = target.get("px_count_all")
+
+        # (1) source 후보 (visibility 통과)
+        eligible = []
+        for i in range(len(masks_np)):
+            visib_area = float(masks_np[i].sum())
+            pxa = float(pxa_all[i]) if pxa_all is not None else visib_area
+            if pxa > 0 and visib_area / pxa >= self.min_visibility:
+                eligible.append(i)
+        if not eligible:
+            return sample
+
+        src_idx = random.choice(eligible)
+        src_class = int(labels[src_idx].item())
+
+        source = _extract_object_at(image, target, src_idx)
+        if source is None:
+            return sample
+
+        W, H = image.size
+
+        # (2) 다른 image에서 same-class candidate 수집
+        # dataset.class_to_image_idx cache가 있으면 random retry 없이 O(1) lookup,
+        # 없으면 fallback으로 random idx + retry. label→cat_id 변환 후 lookup.
+        cache = getattr(dataset, "class_to_image_idx", None)
+        if cache is not None and getattr(dataset, "mscoco_label2category", None):
+            src_cat_id = dataset.mscoco_label2category.get(src_class, src_class)
+        else:
+            src_cat_id = src_class
+        pool = cache.get(src_cat_id) if cache else None
+
+        # cache 기반 lookup일 때만 load_item light-mode 사용 가능
+        # (cache의 image는 같은 class ann이 보장되어 light-mode가 거의 즉시 매치).
+        use_light_mode = pool is not None and cache is not None
+
+        candidates = []
+        attempts = 0
+        while (
+            len(candidates) < self.candidate_pool_size
+            and attempts < self.max_attempts
+        ):
+            attempts += 1
+            try:
+                if pool:
+                    other_idx = random.choice(pool)
+                else:
+                    other_idx = random.randint(0, len(dataset) - 1)
+                if use_light_mode:
+                    other_img, other_target = dataset.load_item(
+                        other_idx,
+                        target_class_label=src_class,
+                        min_visibility=self.min_visibility,
+                        draft_size=image.size,   # JPEG draft (raw 1280×960 → image.size)
+                    )
+                else:
+                    other_img, other_target = dataset.load_item(
+                        other_idx, draft_size=image.size,
+                    )
+            except Exception:
+                continue
+            if other_img is None or other_target is None:
+                continue
+            if not isinstance(other_img, PILImage.Image):
+                continue
+            # candidate가 raw size (1280x960) 이면 현재 image (post-Resize) 크기로 맞춤.
+            # pose/cam_K는 metric/original frame이라 그대로, image-plane만 비례 scale.
+            if other_img.size != image.size:
+                other_img, other_target = _resize_sample(
+                    other_img, other_target, image.size
+                )
+            o_labels = other_target.get("labels")
+            o_masks = other_target.get("masks")
+            if o_labels is None or o_masks is None:
+                continue
+            o_masks_np = (
+                o_masks.numpy() if torch.is_tensor(o_masks) else np.array(o_masks)
+            )
+            o_pxa = other_target.get("px_count_all")
+
+            if use_light_mode:
+                # light-mode: target이 이미 src_class 1개 instance만 가짐
+                same_idx_list = list(range(len(o_labels)))
+            else:
+                same_idx_list = [
+                    i for i in range(len(o_labels))
+                    if int(o_labels[i].item()) == src_class
+                ]
+                if not same_idx_list:
+                    continue
+
+            for i in same_idx_list:
+                vis_area = float(o_masks_np[i].sum())
+                pxa = float(o_pxa[i]) if o_pxa is not None else vis_area
+                if pxa <= 0:
+                    continue
+                visib = vis_area / pxa
+                if visib < self.min_visibility:
+                    continue
+                obj = _extract_object_at(other_img, other_target, i)
+                if obj is None:
+                    continue
+                obj["_visib"] = visib
+                candidates.append(obj)
+                if len(candidates) >= self.candidate_pool_size:
+                    break
+
+        if not candidates:
+            return sample
+
+        # (3) visibility ↓ 정렬 → greedy 비겹침 (source 외 2~4)
+        candidates.sort(key=lambda x: -x.get("_visib", 0.0))
+        n_extra = random.randint(self.min_extra, self.max_extra)
+
+        chosen = [source]
+        occupancy = (source["visib_mask"] > 0).astype(bool).copy()
+
+        def _bbox_iou(b1, b2):
+            x1 = max(b1[0], b2[0]); y1 = max(b1[1], b2[1])
+            x2 = min(b1[2], b2[2]); y2 = min(b1[3], b2[3])
+            iw = max(0.0, x2 - x1); ih = max(0.0, y2 - y1)
+            inter = iw * ih
+            a1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
+            a2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
+            return inter / max(a1 + a2 - inter, 1e-6)
+
+        for cand in candidates:
+            if len(chosen) - 1 >= n_extra:
+                break
+            mask = cand["visib_mask"].astype(bool)
+            visible = float((mask & ~occupancy).sum())
+            cand_pxa = float(cand.get("px_count_all", float(mask.sum())))
+            if cand_pxa <= 0:
+                continue
+            if visible / cand_pxa < self.min_visibility:
+                continue
+            # bbox IoU filter (test_eval은 거의 isolated; cluttered overlap 학습 분포 외)
+            if self.max_bbox_iou < 1.0 and cand.get("box") is not None:
+                cb = cand["box"]
+                cb_arr = cb.numpy()[0] if hasattr(cb, "numpy") else np.asarray(cb)[0]
+                rejected = False
+                for c2 in chosen:
+                    if c2.get("box") is None:
+                        continue
+                    eb = c2["box"]
+                    eb_arr = eb.numpy()[0] if hasattr(eb, "numpy") else np.asarray(eb)[0]
+                    if _bbox_iou(cb_arr, eb_arr) > self.max_bbox_iou:
+                        rejected = True
+                        break
+                if rejected:
+                    continue
+            chosen.append(cand)
+            occupancy |= mask
+
+        if len(chosen) <= 1:
+            return sample
+
+        # (4) depth-ordered composite. voc_root에 이미지 있으면 VOC 사용,
+        # cc_textures_dir이 있으면 V_cc_lite PBR-lite 배경 사용,
+        # 없으면 test_real-style 단색 회색 + 노이즈 + gradient (학습 distribution
+        # 을 test 회색 배경에 맞춤; FP background-as-object 케이스 완화).
+        chosen.sort(key=lambda x: -x["tz"])
+        voc_paths = self._voc_list()
+        cc_paths = self._cc_texture_list()
+        if voc_paths:
+            background = _load_background_image(voc_paths, H, W)
+        elif cc_paths and random.random() < self.cc_bg_prob:
+            background = self._synth_cc_lite_bg(H, W)
+        else:
+            background = self._synth_gray_bg(H, W)
+
+        canvas, occ_map = _depth_composite(
+            chosen, background, H, W, self.edge_blur_kernel
+        )
+        keep_indices, final_masks = _visibility_filter(
+            chosen, occ_map, self.min_visibility
+        )
+        if not keep_indices:
+            return sample
+
+        merged = _build_target_from_objects(chosen, keep_indices, final_masks, H, W)
+        if merged is None:
+            return sample
+
+        for k in target:
+            if k not in merged:
+                merged[k] = target[k]
+
+        return (PILImage.fromarray(canvas), merged, dataset)
+
+
+# ============================================================================
+# GDRN/yolox-style imgaug photometric augmentation
+# ============================================================================
+# Mirrors `gdrnpp_bop2022/det/yolox/data/datasets/mosaicdetection.py::_get_color_augmentor`
+# (aug_type="code") so the COLOR_AUG_CODE string from gdrnpp configs can be
+# evaluated as-is. Operates on PIL RGB images and is opt-in via config:
+#     - {type: GDRNPhotoAug, p: 0.8}
+#     - {type: GDRNGrayscale, p: 0.5, alpha_range: [0.0, 1.0]}
+# Other RACE6D photometric ops (RandomGrayscale, ColorJitter, etc.) are
+# untouched, so existing per-dataset configs keep working.
+
+# gdrnpp/yolox itodd `COLOR_AUG_CODE` 와 골격 동일하나 4개 enhance op의 극단
+# 강도(Sharpness 50배, Contrast 50배 / 0.2배, Brightness 6배 / 0.1배, Color 20배)를
+# 좁힌 ITODD-tuned default. 학습 시 일부 sample이 saturate되어 물체 식별 불가가
+# 되는 현상을 방지. wide variation은 유지. Invert는 그대로 둠. 원본 gdrn 강도가
+# 필요하면 GDRNPhotoAug(code=...) 로 직접 지정 가능.
+_GDRN_DEFAULT_AUG_CODE = (
+    "Sequential(["
+    "Sometimes(0.5, CoarseDropout(p=0.2, size_percent=0.05)),"
+    "Sometimes(0.4, GaussianBlur((0., 3.))),"
+    "Sometimes(0.3, pillike.EnhanceSharpness(factor=(0., 10.))),"
+    "Sometimes(0.3, pillike.EnhanceContrast(factor=(0.7, 10.))),"
+    "Sometimes(0.5, pillike.EnhanceBrightness(factor=(0.7, 4.0))),"
+    "Sometimes(0.3, pillike.EnhanceColor(factor=(0.3, 5.))),"
+    "Sometimes(0.5, Add((-25, 25), per_channel=0.3)),"
+    "Sometimes(0.3, Invert(0.2, per_channel=True)),"
+    "Sometimes(0.5, Multiply((0.6, 1.4), per_channel=0.5)),"
+    "Sometimes(0.5, Multiply((0.6, 1.4))),"
+    "Sometimes(0.1, AdditiveGaussianNoise(scale=10, per_channel=True)),"
+    "Sometimes(0.5, iaa.contrast.LinearContrast((0.5, 2.2), per_channel=0.3)),"
+    "], random_order=True)"
+)
+
+
+def _build_imgaug_from_code(code: str):
+    """eval() helper that exposes the same imgaug namespace as gdrnpp."""
+    import imgaug.augmenters as iaa  # noqa: F401
+    from imgaug.augmenters import (  # noqa: F401
+        Sequential, SomeOf, OneOf, Sometimes, WithColorspace, WithChannels, Noop,
+        Lambda, AssertLambda, AssertShape, Scale, CropAndPad, Pad, Crop, Fliplr,
+        Flipud, Superpixels, ChangeColorspace, PerspectiveTransform, Grayscale,
+        GaussianBlur, AverageBlur, MedianBlur, Convolve, Sharpen, Emboss, EdgeDetect,
+        DirectedEdgeDetect, Add, AddElementwise, AdditiveGaussianNoise, Multiply,
+        MultiplyElementwise, Dropout, CoarseDropout, Invert, ContrastNormalization,
+        Affine, PiecewiseAffine, ElasticTransformation, pillike, LinearContrast,
+    )
+    try:
+        from imgaug.augmenters import Canny  # noqa: F401
+    except Exception:
+        pass
+    return eval(code)
+
+
+@register()
+class GDRNPhotoAug(nn.Module):
+    """yolox/gdrn `COLOR_AUG_CODE` photometric block, applied via imgaug.
+
+    Mirrors `aug_wrapper` in gdrnpp_bop2022 (yolox detection): the inner
+    Sequential is wrapped by an outer Bernoulli with probability `p`
+    (= COLOR_AUG_PROB, default 0.8). The inner block contains its own
+    Sometimes(...) gates exactly as in the upstream config.
+
+    Args:
+        p: outer apply probability (matches COLOR_AUG_PROB).
+        code: imgaug code string. Default = yolox itodd block (no Grayscale).
+    """
+
+    def __init__(self, p: float = 0.8, code: str = None):
+        super().__init__()
+        self.p = float(p)
+        self.code = code if code is not None else _GDRN_DEFAULT_AUG_CODE
+        self._augmentor = None
+
+    def _ensure_built(self):
+        if self._augmentor is None:
+            self._augmentor = _build_imgaug_from_code(self.code)
+        return self._augmentor
+
+    def forward(self, *inputs):
+        sample = inputs[0] if len(inputs) == 1 else inputs
+        if not isinstance(sample, (list, tuple)) or len(sample) < 1:
+            return sample
+        image = sample[0]
+        if not isinstance(image, PILImage.Image):
+            return sample
+        if torch.rand(1).item() >= self.p:
+            return sample
+        aug = self._ensure_built()
+        img_np = np.array(image)
+        img_aug = aug.augment_image(img_np)
+        new_image = PILImage.fromarray(img_aug)
+        return (new_image,) + tuple(sample[1:])
+
+
+@register()
+class GDRNGrayscale(nn.Module):
+    """imgaug Grayscale matching gdrnpp pose configs:
+        Sometimes(p, Grayscale(alpha=alpha_range))
+    Default p=0.5, alpha_range=(0.0, 1.0) — partial grayscale blending,
+    same as `gdrn/itodd_pbr/...itodd.py` line 31.
+    """
+
+    def __init__(self, p: float = 0.5, alpha_range: Tuple[float, float] = (0.0, 1.0)):
+        super().__init__()
+        self.p = float(p)
+        self.alpha_range = (float(alpha_range[0]), float(alpha_range[1]))
+        self._aug = None
+
+    def _ensure_built(self):
+        if self._aug is None:
+            from imgaug.augmenters import Grayscale
+            self._aug = Grayscale(alpha=self.alpha_range)
+        return self._aug
+
+    def forward(self, *inputs):
+        sample = inputs[0] if len(inputs) == 1 else inputs
+        if not isinstance(sample, (list, tuple)) or len(sample) < 1:
+            return sample
+        image = sample[0]
+        if not isinstance(image, PILImage.Image):
+            return sample
+        if torch.rand(1).item() >= self.p:
+            return sample
+        aug = self._ensure_built()
+        img_np = np.array(image)
+        img_aug = aug.augment_image(img_np)
+        new_image = PILImage.fromarray(img_aug)
+        return (new_image,) + tuple(sample[1:])

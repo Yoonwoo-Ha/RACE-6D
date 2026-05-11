@@ -1,7 +1,7 @@
 """
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 ---------------------------------------------------------------------
-Copyright(c) 2025 Anonymous. All Rights Reserved.
+Copyright(c) 2026 Yoonwoo-Ha. All Rights Reserved.
 ---------------------------------------------------------------------
 """
 
