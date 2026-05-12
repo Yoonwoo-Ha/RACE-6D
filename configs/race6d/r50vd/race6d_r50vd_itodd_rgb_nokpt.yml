@@ -6,7 +6,7 @@ __include__: [
   '../include/race6d_r50vd_best.yml',
 ]
 
-output_dir: ./output/race6d_r50vd_itodd_rgb
+output_dir: ./output/race6d_r50vd_itodd_rgb_nokpt
 coco_path: ~/Downloads/itodd/
 category_file: ./configs/race6d/include/itodd2coco_category.yml
 num_classes: 28
@@ -14,7 +14,7 @@ eval_spatial_size: [480, 640]
 
 RACE6D:
   backbone: PResNet
-  decoder: RACE6DTransformer_DQE
+  decoder: RACE6DTransformer_DQE_NoKpt
 
 PResNet:
   depth: 50
@@ -35,7 +35,7 @@ HybridEncoder:
   depth_mult: 0.67
   enc_act: quick_gelu
 
-RACE6DTransformer_DQE:
+RACE6DTransformer_DQE_NoKpt:
   feat_channels: [256, 256, 256]
   feat_strides: [8, 16, 32]
   hidden_dim: 256
@@ -54,11 +54,11 @@ RACE6DPostProcessor:
   remap_mscoco_category: False
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
-  losses: ['vfl', 'boxes', 'pose', 'keypoint']
+  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
+  losses: ['mal', 'boxes', 'pose', 'keypoint']
   alpha: 0.75
   gamma_pos: 1.5
-  gamma_neg: 2.0
+  gamma_neg: 2.5
   compute_aux_metrics: False  # ITODD: skip metric computation for aux/enc layers (speeds up training; main metric still logged)
 
   matcher:
@@ -72,7 +72,11 @@ optimizer:
   params:
     - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
-      
+    # - params: ^(?=.*score_head).*$
+    #   lr: 5.0e-05  # 0.5x score_head
+    # - params: ^(?=.*bbox_head).*$
+    #   lr: 7.0e-05  # 0.7x bbox_head
+
   lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
@@ -94,13 +98,13 @@ train_dataloader:
     transforms:
       ops:
         - {type: Resize, size: [480, 640]}
-        - {type: CopyPasteSingleClass, p: 0.8, min_extra: 2, max_extra: 10, candidate_pool_size: 9, min_visibility: 0.7, max_bbox_iou: 0.3, voc_root: ~,
+        - {type: CopyPasteSingleClass, p: 0.75, min_extra: 2, max_extra: 9, candidate_pool_size: 9, min_visibility: 0.7, max_bbox_iou: 0.3, voc_root: ~,
            cc_textures_dir: '~/Downloads/cc_textures',
            cc_cache_dir: '~/Downloads/cc_textures_cache',
-           cc_industrial_only: True, cc_bg_prob: 1.0}
+           cc_industrial_only: True, cc_bg_prob: 0.833}
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-        - {type: GDRNPhotoAug, p: 0.7}
-        - {type: GDRNGrayscale, p: 0.7, alpha_range: [0.0, 1.0]}
+        - {type: GDRNPhotoAug, p: 0.75}
+        - {type: GDRNGrayscale, p: 0.75, alpha_range: [0.0, 1.0]}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
       policy:

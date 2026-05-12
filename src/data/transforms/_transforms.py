@@ -1242,6 +1242,147 @@ def _build_target_from_objects(objects, keep_indices, final_masks, H, W):
     return target
 
 
+# ---------------------------------------------------------------------------
+# ROI variants of the CopyPaste hot path. Used exclusively by
+# CopyPasteSingleClass; the full-canvas helpers above remain in use by
+# PoseAugmentation (instance mode), which mutates obj["pixels"] via
+# cv2.warpAffine and therefore requires full H×W storage.
+#
+# Schema differences vs the full-canvas extractor:
+#   - pixels_roi : (h, w, 3) uint8 — cropped to mask bbox, then mask-zeroed
+#   - mask_roi   : (h, w)    uint8 — cropped visibility mask
+#   - bbox_roi   : (y0, y1, x0, x1)
+#   - visib_mask : (H, W)    uint8 — kept full-res for occupancy/IoU queries
+#   - full_mask  : (H, W)    uint8 — kept full-res for downstream targets
+# All other fields (tz, pose, label, box, cam_K, px_count_all) match
+# _extract_object_at exactly, so _build_target_from_objects works unchanged.
+# ---------------------------------------------------------------------------
+def _extract_object_at_roi(image, target, idx):
+    """ROI variant of `_extract_object_at` — pixels are stored only inside the
+    object's tight bbox to avoid full H×W per-object copies in composite.
+
+    Composite output is byte-identical to the full-canvas path.
+    """
+    masks = target.get("masks")
+    poses = target.get("poses")
+    labels = target.get("labels")
+    cam_K = target.get("cam_K")
+    full_masks = target.get("full_masks")
+    boxes = target.get("boxes")
+    px_count_all = target.get("px_count_all")
+
+    if masks is None or poses is None or labels is None:
+        return None
+
+    masks_np = masks.numpy() if torch.is_tensor(masks) else np.array(masks)
+    if idx >= len(masks_np):
+        return None
+    visib_mask = masks_np[idx]
+    if visib_mask.sum() == 0:
+        return None
+
+    ys, xs = np.where(visib_mask > 0)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    mask_roi = visib_mask[y0:y1, x0:x1].astype(np.uint8)
+
+    img_np = np.array(image)
+    pixels_roi = img_np[y0:y1, x0:x1].copy()
+    pixels_roi[mask_roi == 0] = 0
+
+    poses_data = poses.data if isinstance(poses, Pose) else poses
+    box_data = boxes.data if hasattr(boxes, "data") else (
+        boxes if boxes is not None else None
+    )
+    pose = poses_data[idx]
+    tz = float(pose[2].item() if isinstance(pose[2], torch.Tensor) else pose[2])
+
+    obj = {
+        "pixels_roi": pixels_roi,
+        "mask_roi": mask_roi,
+        "bbox_roi": (y0, y1, x0, x1),
+        "visib_mask": visib_mask.astype(np.uint8),
+        "tz": tz,
+        "pose": pose.clone() if isinstance(pose, torch.Tensor) else torch.tensor(pose),
+        "label": labels[idx:idx + 1].clone(),
+        "box": box_data[idx:idx + 1].clone() if box_data is not None else None,
+    }
+
+    if px_count_all is not None:
+        val = px_count_all[idx]
+        obj["px_count_all"] = float(val.item() if isinstance(val, torch.Tensor) else val)
+    else:
+        obj["px_count_all"] = float(visib_mask.sum())
+
+    if cam_K is not None:
+        obj["cam_K"] = (
+            cam_K[idx:idx + 1].clone()
+            if len(cam_K.shape) > 1
+            else cam_K.unsqueeze(0).clone()
+        )
+
+    if full_masks is not None:
+        fm = full_masks[idx]
+        fm_np = fm.numpy() if torch.is_tensor(fm) else np.array(fm)
+        obj["full_mask"] = fm_np.astype(np.uint8)
+    else:
+        obj["full_mask"] = visib_mask.astype(np.uint8)
+
+    return obj
+
+
+def _depth_composite_roi(objects, background, H, W, edge_blur_kernel=0):
+    """ROI variant of `_depth_composite`. Touches canvas only inside each
+    object's bbox_roi. Byte-identical to the full-canvas path (verified by
+    scripts/bench_copypaste_roi.py for edge_blur in {0, 5}).
+    """
+    canvas = background.copy()
+    occupancy = np.full((H, W), -1, dtype=np.int32)
+    for i, obj in enumerate(objects):
+        y0, y1, x0, x1 = obj["bbox_roi"]
+        m = obj["mask_roi"]
+        px = obj["pixels_roi"]
+        sub_canvas = canvas[y0:y1, x0:x1]
+        if edge_blur_kernel > 0:
+            alpha = _gaussian_blur_edge(m, edge_blur_kernel)
+            alpha = np.clip(alpha, 0, 1)
+            a3 = alpha[..., None]
+            canvas[y0:y1, x0:x1] = (sub_canvas * (1 - a3) + px * a3).astype(np.uint8)
+            occupancy[y0:y1, x0:x1][m > 0] = i
+        else:
+            sub_canvas[m > 0] = px[m > 0]
+            occupancy[y0:y1, x0:x1][m > 0] = i
+    return canvas, occupancy
+
+
+def _visibility_filter_roi(objects, occupancy, H, W, min_visibility=0.1, min_modal_size=5):
+    """ROI variant of `_visibility_filter`. Reads occupancy only inside each
+    object's bbox_roi but returns full H×W final masks (so downstream
+    `_build_target_from_objects` is unchanged).
+    """
+    keep_indices = []
+    final_masks = []
+    for i, obj in enumerate(objects):
+        y0, y1, x0, x1 = obj["bbox_roi"]
+        sub_fm = (occupancy[y0:y1, x0:x1] == i).astype(np.uint8)
+        pxa = obj.get("px_count_all", 0)
+        denom = pxa if pxa > 0 else obj["full_mask"].sum()
+        if denom == 0:
+            continue
+        if sub_fm.sum() / denom < min_visibility:
+            continue
+        vys, vxs = np.where(sub_fm > 0)
+        if len(vys) == 0:
+            continue
+        if (vxs.max() - vxs.min()) < min_modal_size or (vys.max() - vys.min()) < min_modal_size:
+            continue
+        full = np.zeros((H, W), dtype=np.uint8)
+        full[y0:y1, x0:x1] = sub_fm
+        keep_indices.append(i)
+        final_masks.append(full)
+    return keep_indices, final_masks
+
+
 def _load_background_image(background_images, H, W):
     """Load a background image (from image list or random solid color)."""
     import random as _rng
@@ -2491,7 +2632,6 @@ class CopyPasteSingleClass(nn.Module):
         overhead. Falls back to per-call JPEG loading when cache is absent.
         """
         import random as _rng
-        from scipy.ndimage import gaussian_filter
 
         if self._cc_cache_load():
             # --- Fast path: mmap cache ---
@@ -2602,7 +2742,7 @@ class CopyPasteSingleClass(nn.Module):
         shaded = (ambient + diff_w * diffuse) * color_n + spec_w * specular
         shaded = np.clip(shaded * 255, 0, 255)
 
-        shaded = gaussian_filter(shaded, sigma=1.0)
+        shaded = cv2.GaussianBlur(np.ascontiguousarray(shaded, dtype=np.float32), (0, 0), sigmaX=1.0)
 
         target_mean = _rng.uniform(30, 50)
         shift = target_mean - shaded.mean()
@@ -2692,7 +2832,7 @@ class CopyPasteSingleClass(nn.Module):
         src_idx = random.choice(eligible)
         src_class = int(labels[src_idx].item())
 
-        source = _extract_object_at(image, target, src_idx)
+        source = _extract_object_at_roi(image, target, src_idx)
         if source is None:
             return sample
 
@@ -2775,7 +2915,7 @@ class CopyPasteSingleClass(nn.Module):
                 visib = vis_area / pxa
                 if visib < self.min_visibility:
                     continue
-                obj = _extract_object_at(other_img, other_target, i)
+                obj = _extract_object_at_roi(other_img, other_target, i)
                 if obj is None:
                     continue
                 obj["_visib"] = visib
@@ -2847,11 +2987,11 @@ class CopyPasteSingleClass(nn.Module):
         else:
             background = self._synth_gray_bg(H, W)
 
-        canvas, occ_map = _depth_composite(
+        canvas, occ_map = _depth_composite_roi(
             chosen, background, H, W, self.edge_blur_kernel
         )
-        keep_indices, final_masks = _visibility_filter(
-            chosen, occ_map, self.min_visibility
+        keep_indices, final_masks = _visibility_filter_roi(
+            chosen, occ_map, H, W, self.min_visibility
         )
         if not keep_indices:
             return sample
