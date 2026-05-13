@@ -26,7 +26,6 @@ RACE6D treats 6D pose estimation as a **set-prediction problem**. Object queries
 - **6D continuous rotation** representation ([Zhou et al., CVPR 2019](https://arxiv.org/abs/1812.07035))
 - **ADD-S loss** on sampled 3D model points with symmetry-aware matching
 - **Registry + YAML-driven** architecture — swap backbones, encoders, or heads with a single config line
-- **BOP-compatible** evaluation pipeline out of the box
 - **RGB and RGB-D** modalities supported
 
 ## 📦 Installation
@@ -112,23 +111,13 @@ python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml \
     --test-only -r path/to/checkpoint.pth
 ```
 
-### 3. BOP-format evaluation
-
-```bash
-# Generate BOP-format CSV results (edit dataset paths inside bop.py first)
-python bop.py
-
-# Per-layer ADD-S evaluation
-python test.py
-```
-
-### 4. TensorBoard
+### 3. TensorBoard
 
 ```bash
 tensorboard --logdir=output/race6d_r50vd_lmo_rgb/summary/ --port=8989
 ```
 
-### 5. Export & profile
+### 4. Export & profile
 
 ```bash
 python tools/export_onnx.py -c config.yml -r checkpoint.pth --check
@@ -178,7 +167,7 @@ race6d_r50vd_lmo_rgb.yml
 ```graphql
 ├── configs/race6d/
 │   ├── include/                      # Shared config fragments (model, optimizer, dataloader)
-│   └── r50vd/                        # Per-dataset configs (LMO, YCBV, T-LESS, TUD-L, HB, IC-BIN)
+│   └── r50vd/                        # Per-dataset configs (LMO, YCBV, T-LESS, TUD-L, HB, IC-BIN, ITODD)
 ├── src/
 │   ├── core/workspace.py             # Registry, factory, DI
 │   ├── core/yaml_config.py           # Lazy YAML config loader
@@ -201,8 +190,6 @@ race6d_r50vd_lmo_rgb.yml
 │   ├── train.py                      # Main entry point
 │   ├── export_onnx.py                # ONNX export
 │   └── run_profile.py                # Profiling
-├── bop.py                            # BOP-format CSV generation
-├── test.py                           # Per-layer ADD-S evaluation
 └── output/                           # Checkpoints, logs, TensorBoard summaries
 ```
 
