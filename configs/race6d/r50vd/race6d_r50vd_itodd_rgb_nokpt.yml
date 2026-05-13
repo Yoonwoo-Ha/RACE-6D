@@ -74,8 +74,10 @@ optimizer:
       weight_decay: 0.
     # - params: ^(?=.*score_head).*$
     #   lr: 5.0e-05  # 0.5x score_head
-    # - params: ^(?=.*bbox_head).*$
-    #   lr: 7.0e-05  # 0.7x bbox_head
+    - params: ^(?=.*bbox_head).*$
+      lr: 7.0e-05  # 0.7x bbox_head
+    - params: ^(?=.*reg_head).*$
+      lr: 7.0e-05  # 0.7x reg_head
 
   lr: 0.0001
   betas: [0.9, 0.999]
@@ -98,10 +100,10 @@ train_dataloader:
     transforms:
       ops:
         - {type: Resize, size: [480, 640]}
-        - {type: CopyPasteSingleClass, p: 0.75, min_extra: 2, max_extra: 9, candidate_pool_size: 9, min_visibility: 0.7, max_bbox_iou: 0.3, voc_root: ~,
+        - {type: CopyPasteSingleClass, p: 0.75, min_extra: 2, max_extra: 9, candidate_pool_size: 9, min_visibility: 0.4, max_bbox_iou: 0.5, voc_root: ~,
            cc_textures_dir: '~/Downloads/cc_textures',
            cc_cache_dir: '~/Downloads/cc_textures_cache',
-           cc_industrial_only: True, cc_bg_prob: 0.833}
+           cc_industrial_only: True, cc_bg_prob: 0.9}
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: GDRNPhotoAug, p: 0.75}
         - {type: GDRNGrayscale, p: 0.75, alpha_range: [0.0, 1.0]}

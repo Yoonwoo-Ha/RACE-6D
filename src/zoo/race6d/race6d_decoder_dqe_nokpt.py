@@ -702,20 +702,35 @@ class RACE6DTransformer_DQE_NoKpt(nn.Module):
 
     @staticmethod
     def _load_model_points(o3d, file_path, num_samples=1500):
-        """Load 3D points from PLY file and apply FPS sampling."""
-        pcd = o3d.io.read_point_cloud(file_path)
-        points = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
+        """Sample points uniformly on the PLY surface, then FPS for coverage.
+
+        Previous behavior used raw vertices via o3d.io.read_point_cloud, which
+        for low-poly meshes (e.g. obj_25=466, obj_27=920) skipped FPS entirely
+        and repeat-padded vertices — leaving the supervision concentrated on
+        sparse corner points. read_triangle_mesh + sample_points_uniformly
+        gives a face-aware uniform distribution; FPS on top of an oversampled
+        seed retains the spatial-coverage property of the original recipe.
+        """
+        mesh = o3d.io.read_triangle_mesh(file_path)
+        if mesh.has_triangles():
+            seed_n = max(num_samples * 4, 5000)
+            pcd = mesh.sample_points_uniformly(number_of_points=seed_n)
+            points = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
+        else:
+            # Fallback for face-less PLYs (rare)
+            pcd = o3d.io.read_point_cloud(file_path)
+            points = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
+
         if len(points) == 0:
             return torch.zeros(num_samples, 3)
         if len(points) >= num_samples:
             sampled, _ = sample_farthest_points(points.unsqueeze(0), K=num_samples)
             return sampled.squeeze(0)
-        else:
-            sampled = points
-            while len(sampled) < num_samples:
-                remaining = num_samples - len(sampled)
-                sampled = torch.cat([sampled, points[:remaining]], dim=0)
-            return sampled[:num_samples]
+        # Should not happen now (seed_n >= 5000), but keep a safe fallback.
+        while len(points) < num_samples:
+            remaining = num_samples - len(points)
+            points = torch.cat([points, points[:remaining]], dim=0)
+        return points[:num_samples]
 
     @staticmethod
     def _load_keypoints_3d_and_edges(coco_path):
