@@ -447,6 +447,8 @@ class RACE6DTransformer_DQE(nn.Module):
                  reg_scale=1.0,
                  num_keypoints=32,
                  mlp_act='silu',
+                 enc_mlp_act=None,
+                 dec_mlp_act=None,
                  coco_path=None,
                  category_file=None,
                  max_sym_disc_step=0.01,
@@ -471,6 +473,12 @@ class RACE6DTransformer_DQE(nn.Module):
         self.num_queries = num_queries
         self.eps = eps
         self.num_layers = num_layers
+        # Older checkpoints used ReLU in the encoder proposal heads while
+        # keeping QuickGELU in the decoder refinement heads.  Preserve the
+        # existing single-activation behavior by default, but allow an eval
+        # config to express that mixed setup without changing parameter keys.
+        enc_mlp_act = mlp_act if enc_mlp_act is None else enc_mlp_act
+        dec_mlp_act = mlp_act if dec_mlp_act is None else dec_mlp_act
         # eval_spatial_size: actual model input size (for anchors/pos embed)
         self.eval_spatial_size = eval_spatial_size
         self.aux_loss = aux_loss
@@ -517,29 +525,29 @@ class RACE6DTransformer_DQE(nn.Module):
             ('norm', nn.LayerNorm(hidden_dim)),
         ]))
         self.enc_score_head = nn.Linear(hidden_dim, enc_score_cls)
-        self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3, mlp_act)
-        self.enc_kpt_head = MLP(hidden_dim, hidden_dim, 2 * num_keypoints, 3, mlp_act)
-        self.enc_trans_head = MLP(hidden_dim, hidden_dim, 3, 3, mlp_act)
-        self.enc_rot_head = MLP(hidden_dim + 2 * num_keypoints, hidden_dim, 6, 3, mlp_act)
+        self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3, enc_mlp_act)
+        self.enc_kpt_head = MLP(hidden_dim, hidden_dim, 2 * num_keypoints, 3, enc_mlp_act)
+        self.enc_trans_head = MLP(hidden_dim, hidden_dim, 3, 3, enc_mlp_act)
+        self.enc_rot_head = MLP(hidden_dim + 2 * num_keypoints, hidden_dim, 6, 3, enc_mlp_act)
 
         # decoder head
         self.dec_score_head = nn.ModuleList([
             nn.Linear(hidden_dim, num_classes) for _ in range(num_layers)
         ])
         self.dec_bbox_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, 4, 3, mlp_act) for _ in range(num_layers) # (cx, cy, w, h)
+            MLP(hidden_dim, hidden_dim, 4, 3, dec_mlp_act) for _ in range(num_layers) # (cx, cy, w, h)
         ])
         self.dec_kpt_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, 2 * num_keypoints, 3, mlp_act) for _ in range(num_layers) # rx, ry
+            MLP(hidden_dim, hidden_dim, 2 * num_keypoints, 3, dec_mlp_act) for _ in range(num_layers) # rx, ry
         ])
         self.dec_trans_xy_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, 2, 3, mlp_act) for _ in range(num_layers) # rx, ry
+            MLP(hidden_dim, hidden_dim, 2, 3, dec_mlp_act) for _ in range(num_layers) # rx, ry
         ])
         self.dec_reg_head = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, reg_max + 1 , 3, mlp_act) for _ in range(num_layers) # 33 bins for depth
+            MLP(hidden_dim, hidden_dim, reg_max + 1 , 3, dec_mlp_act) for _ in range(num_layers) # 33 bins for depth
         ])
         self.dec_rot_head = nn.ModuleList([
-            MLP(hidden_dim + 2 * num_keypoints, hidden_dim, 6, 3, mlp_act) for _ in range(num_layers)
+            MLP(hidden_dim + 2 * num_keypoints, hidden_dim, 6, 3, dec_mlp_act) for _ in range(num_layers)
         ]) # rotation-6d
 
         # init encoder output anchors and valid_mask

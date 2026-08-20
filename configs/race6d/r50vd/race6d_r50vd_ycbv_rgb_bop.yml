@@ -1,0 +1,20 @@
+__include__: [
+  './race6d_r50vd_ycbv_rgb.yml',
+]
+
+# Current-native inference settings for the migrated legacy YCB-V weights.
+# The original leaderboard checkpoint used a legacy model implementation;
+# this config is intentionally LQE-free and compatible with main_v3.
+RACE6DTransformer_DQE:
+  num_queries: 50
+  eval_idx: 1
+  activation: relu
+  mlp_act: quick_gelu
+  enc_mlp_act: relu
+  dec_mlp_act: quick_gelu
+  vis_enc: False
+
+RACE6DPostProcessor:
+  num_top_queries: 50
+  vis_enc: False
+  remap_mscoco_category: True

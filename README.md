@@ -69,6 +69,51 @@ Download the BOP datasets you want to train on from the [BOP benchmark website](
 
 Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_rgb.yml` to match your local layout. Each dataset directory must contain the `models/` folder (3D CAD models are loaded by the criterion at initialization).
 
+## 🧠 Pretrained Checkpoints
+
+The following downloads contain the inference EMA weights only. Optimizer,
+LR-scheduler, scaler, and other training-resume states are intentionally
+excluded, reducing each file to approximately 147–148 MiB.
+
+| Dataset | Input | BOP AR | Training epoch | Config | Checkpoint |
+|---------|-------|-------:|---------------:|--------|------------|
+| LM-O | RGB | 0.669 | 50 | `race6d_r50vd_lmo_rgb.yml` | [Download](https://drive.google.com/open?id=1g_IsNnAqK-As_aamRnGbPfW2WWTLebF0) |
+| YCB-V | RGB | 0.782 | 66 | `race6d_r50vd_ycbv_rgb_bop.yml` | [Download](https://drive.google.com/open?id=10JNTL6LkrGGiqn6Ko8JeUW29ImbN99fV) |
+| T-LESS | RGB | 0.680 | 30 | `race6d_r50vd_tless_rgb.yml` | [Download](https://drive.google.com/open?id=1fxOaN2ANZjzDdR_StzLu-RtbBxspAwWp) |
+| T-LESS | RGB-D | 0.755 | 27 | `race6d_r50vd_tless_rgbd.yml` | [Download](https://drive.google.com/open?id=1kRQrgiTLd3LSOJtuEIkMScQHUOwJD8AM) |
+| TUD-L | RGB | 0.802 | 34 | `race6d_r50vd_tudl_rgb.yml` | [Download](https://drive.google.com/open?id=1RNi5PCUu6vc3aLlflsNnSgR_DGMiYfCa) |
+| HB | RGB | 0.682 | 40 | `race6d_r50vd_hb_rgb.yml` | [Download](https://drive.google.com/open?id=1X64A6GNxHD7bwQuJfPSBT7uNZiaGJgrW) |
+| IC-BIN | RGB | 0.597 | 29 | `race6d_r50vd_icbin_rgb.yml` | [Download](https://drive.google.com/open?id=1il8QATnF_mq0ihGVz5q8wOM5-SEggkSR) |
+
+Evaluate an EMA-only checkpoint with the matching config:
+
+```bash
+python tools/train.py \
+    -c configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml \
+    --test-only -r path/to/race6d_r50vd_lmo_rgb_ema.pth
+```
+
+For fine-tuning, load these weights with `-t`. They are not full training
+checkpoints and must not be used to resume optimizer state.
+
+The ITODD checkpoint is withheld pending re-evaluation on the official BOP
+server.
+
+<details>
+<summary>SHA-256 checksums</summary>
+
+```text
+668c57e08606dc335c7abdc50bf5f51d9272e97e572a9852dae2f5a343705258  race6d_r50vd_lmo_rgb_ema.pth
+a80f6732498f9212884a655b3bca0208731748385130d0f57407d9452da8d30b  race6d_r50vd_ycbv_rgb_ema.pth
+03430ec1625f5eac3b37bd45c7dea56b901076bce4027d568fc9af0fed341cc7  race6d_r50vd_tless_rgb_ema.pth
+7f76b9e05a289f362fd0fe84710660c283a6192458031f348c8ccef9fb93eb6c  race6d_r50vd_tless_rgbd_ema.pth
+7121587403f50c80109700cf75ca1c24d332f0e6fdcf86a256114555a9bbcafd  race6d_r50vd_tudl_rgb_ema.pth
+e695e33dec4dba1241ab4a9f4e7b7c67fa2f9f3eacf8563cb1f445c39eaf61f9  race6d_r50vd_hb_rgb_ema.pth
+62703895f5b6f687edae58e50089fd3bec2a54f2c0fed0e7aca5343a5ec0ef11  race6d_r50vd_icbin_rgb_ema.pth
+```
+
+</details>
+
 ## 🚀 Getting Started
 
 ### 1. Train
