@@ -78,7 +78,7 @@ excluded, reducing each file to approximately 147–148 MiB.
 | Dataset | Input | BOP AR | Training epoch | Config | Checkpoint |
 |---------|-------|-------:|---------------:|--------|------------|
 | LM-O | RGB | 0.669 | 50 | `race6d_r50vd_lmo_rgb.yml` | [Download](https://drive.google.com/open?id=1g_IsNnAqK-As_aamRnGbPfW2WWTLebF0) |
-| YCB-V | RGB | 0.782 | 66 | Legacy BOP config (see below) | [Download](https://drive.google.com/open?id=1mlNnT_7KhnsO0-0vYIStM1jOQwNqwiVY) |
+| YCB-V | RGB | 0.782 | 66 | `race6d_r50vd_ycbv_rgb_bop.yml` | [Download](https://drive.google.com/open?id=10JNTL6LkrGGiqn6Ko8JeUW29ImbN99fV) |
 | T-LESS | RGB | 0.680 | 30 | `race6d_r50vd_tless_rgb.yml` | [Download](https://drive.google.com/open?id=1fxOaN2ANZjzDdR_StzLu-RtbBxspAwWp) |
 | T-LESS | RGB-D | 0.755 | 27 | `race6d_r50vd_tless_rgbd.yml` | [Download](https://drive.google.com/open?id=1kRQrgiTLd3LSOJtuEIkMScQHUOwJD8AM) |
 | TUD-L | RGB | 0.802 | 34 | `race6d_r50vd_tudl_rgb.yml` | [Download](https://drive.google.com/open?id=1RNi5PCUu6vc3aLlflsNnSgR_DGMiYfCa) |
@@ -96,12 +96,6 @@ python tools/train.py \
 For fine-tuning, load these weights with `-t`. They are not full training
 checkpoints and must not be used to resume optimizer state.
 
-> **YCB-V compatibility:** The leaderboard checkpoint uses the legacy
-> 50-query decoder/postprocessor with `eval_idx=1`, `vis_enc=False`, and
-> MS-COCO category remapping enabled. It is published for reproducibility but
-> is not directly loadable with the current YCB-V training config. A legacy
-> compatibility config/adapter is still required.
-
 The ITODD checkpoint is withheld pending re-evaluation on the official BOP
 server.
 
@@ -110,7 +104,7 @@ server.
 
 ```text
 668c57e08606dc335c7abdc50bf5f51d9272e97e572a9852dae2f5a343705258  race6d_r50vd_lmo_rgb_ema.pth
-af163fecc71a8dde1ac0152a44e6f01b301a403cfb9ea7aa32cb088431d7a900  race6d_r50vd_ycbv_rgb_ema.pth
+a80f6732498f9212884a655b3bca0208731748385130d0f57407d9452da8d30b  race6d_r50vd_ycbv_rgb_ema.pth
 03430ec1625f5eac3b37bd45c7dea56b901076bce4027d568fc9af0fed341cc7  race6d_r50vd_tless_rgb_ema.pth
 7f76b9e05a289f362fd0fe84710660c283a6192458031f348c8ccef9fb93eb6c  race6d_r50vd_tless_rgbd_ema.pth
 7121587403f50c80109700cf75ca1c24d332f0e6fdcf86a256114555a9bbcafd  race6d_r50vd_tudl_rgb_ema.pth
