@@ -67,6 +67,13 @@ Download the BOP datasets you want to train on from the [BOP benchmark website](
 - [IC-BIN](https://bop.felk.cvut.cz/datasets/#IC-BIN)
 - [ITODD](https://bop.felk.cvut.cz/datasets/#ITODD)
 
+Prepare the COCO annotations using the [RACE6D fork of BOP Toolkit](https://github.com/Yoonwoo-Ha/bop_toolkit).
+Follow [README_RACE6D.md](https://github.com/Yoonwoo-Ha/bop_toolkit/blob/race6d-data/README_RACE6D.md)
+for installation, conversion with `scripts/prepare_race6d_coco.py`, RGB-D export,
+and preparation of the separate 3D keypoint cache. The converter expects raw
+datasets under `~/Downloads/<dataset>/` by default; the guide explains how to
+use a different location.
+
 Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_rgb.yml` to match your local layout. Each dataset directory must contain the `models/` folder (3D CAD models are loaded by the criterion at initialization).
 
 ## 🧠 Pretrained Checkpoints
@@ -275,7 +282,7 @@ RACE6D builds on ideas and code from:
 
 - [RT-DETR / RT-DETRv2](https://github.com/lyuwenyu/RT-DETR) — real-time detection transformer backbone
 - [PyTorch3D](https://github.com/facebookresearch/pytorch3d) — 3D geometry and rotation utilities
-- [BOP Toolkit](https://github.com/thodan/bop_toolkit) — benchmark evaluation
+- [BOP Toolkit (RACE6D fork)](https://github.com/Yoonwoo-Ha/bop_toolkit) — dataset preparation and benchmark evaluation, based on the [upstream BOP Toolkit](https://github.com/thodan/bop_toolkit)
 - [Zhou et al., CVPR 2019](https://arxiv.org/abs/1812.07035) — 6D continuous rotation representation
 
 ## 📝 Citation
