@@ -1,8 +1,8 @@
 __include__: [
-  './race6d_r50vd_ycbv_rgb.yml',
+  './race6d_r50vd_ycbv_rgbd.yml',
 ]
 
-# Inference config for the released (migrated) YCB-V RGB weights. The training config already gives the same
+# Inference config for the released (migrated) YCB-V RGB-D weights. The training config already gives the same
 # predictions (its eval_idx sets the output layer); this file only turns off the auxiliary outputs.
 RACE6DTransformer_DQE:
   vis_enc: False

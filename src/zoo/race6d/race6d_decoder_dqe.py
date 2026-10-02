@@ -22,6 +22,7 @@ from pytorch3d.transforms import rotation_6d_to_matrix
 from pytorch3d.ops import sample_farthest_points
 from .utils import deformable_attention_core_func_v2, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob, depth_ratio_weighting_focus_center, distance2depth
+from .utils import check_rot_repr
 
 from .denoising import get_pose_denoising_training_group
 from ...core import register
@@ -420,7 +421,7 @@ class TransformerDecoder(nn.Module):
 
 @register()
 class RACE6DTransformer_DQE(nn.Module):
-    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file']
+    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file', 'rot_repr']
 
     def __init__(self,
                  num_classes=80,
@@ -457,6 +458,7 @@ class RACE6DTransformer_DQE(nn.Module):
                  box_noise_scale=1.0,
                  r_min=0.5,
                  r_max=2.0,
+                 rot_repr='ego',
                  ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -489,6 +491,8 @@ class RACE6DTransformer_DQE(nn.Module):
         self.num_denoising = num_denoising
         self.label_noise_ratio = label_noise_ratio
         self.box_noise_scale = box_noise_scale
+        # 'ego' | 'allo': only the DN encoder-to-GT matching reads the rotation frame (see denoising.py)
+        self.rot_repr = check_rot_repr(rot_repr)
         if num_denoising > 0:
             self.denoising_class_embed = nn.Embedding(num_classes + 1, hidden_dim, padding_idx=num_classes)
             init.normal_(self.denoising_class_embed.weight[:-1])
@@ -1014,6 +1018,7 @@ class RACE6DTransformer_DQE(nn.Module):
                 num_denoising=self.num_denoising,
                 label_noise_ratio=self.label_noise_ratio,
                 box_noise_scale=self.box_noise_scale,
+                rot_repr=self.rot_repr,
             )
 
             if dn_result[0] is not None:
@@ -1060,7 +1065,10 @@ class RACE6DTransformer_DQE(nn.Module):
         out_rots = out_rots_raw.float()
 
         if self.vis_enc:
-            out = {'pred_logits': out_logits[-1], 'pred_boxes': out_bboxes[-1], 'pred_keypoints': out_kpts[-1], 'pred_translations': out_trans[-1], 'pred_rotations': out_rots[-1]}
+            # All layers are returned for the auxiliary losses; in eval the final output follows eval_idx
+            # (the same layer that vis_enc=False stops at), in training it is the last layer.
+            f = -1 if self.training else self.decoder.eval_idx
+            out = {'pred_logits': out_logits[f], 'pred_boxes': out_bboxes[f], 'pred_keypoints': out_kpts[f], 'pred_translations': out_trans[f], 'pred_rotations': out_rots[f]}
             out['aux_outputs'] = self._set_aux_loss(out_logits[:-1], out_bboxes[:-1], out_kpts[:-1], out_trans[:-1], out_rots[:-1])
             # Encoder outputs also use groups: [B, G*N, ...] (rf-detr style)
             out['enc_aux_outputs'] = self._set_aux_loss(enc_topk_logits_list, enc_topk_bboxes_list, enc_topk_kpts_list, enc_topk_trans_list, enc_topk_rots_list)

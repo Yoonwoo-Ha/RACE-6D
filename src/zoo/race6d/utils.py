@@ -299,3 +299,45 @@ def evenly_distributed_rotation(n, random_seed=None):
     down = normalize(torch.linalg.cross(forward, right, dim=1))
     R_mat = torch.stack([right, down, forward], dim=1)
     return R_mat
+
+def _ray_align_rotation(t, eps=1e-6):
+    """Rotation R_ray mapping the camera optical axis z=(0,0,1) to the viewing ray
+    d = t/||t|| via the minimal rotation about (z x d). Batched: t is [..., 3] ->
+    R_ray [..., 3, 3]. Stable for objects in front of the camera (t_z > 0)."""
+    d = t / t.norm(dim=-1, keepdim=True).clamp_min(eps)
+    dx, dy, dz = d[..., 0], d[..., 1], d[..., 2]
+    zero = torch.zeros_like(dx)
+    # skew-symmetric K = [v]_x with v = z x d = (-dy, dx, 0)
+    K = torch.stack([
+        torch.stack([zero, zero,  dx], dim=-1),
+        torch.stack([zero, zero,  dy], dim=-1),
+        torch.stack([-dx,  -dy, zero], dim=-1),
+    ], dim=-2)                                              # [..., 3, 3]
+    eye = torch.eye(3, dtype=t.dtype, device=t.device).expand_as(K)
+    c = dz[..., None, None]                                 # cos = z . d
+    return eye + K + (K @ K) / (1.0 + c).clamp_min(eps)
+
+
+def allocentric_to_egocentric(R_allo, t):
+    """Allocentric rotation (canonical w.r.t. the viewing ray) -> egocentric (camera frame):
+    R_ego = R_ray(t) @ R_allo. `t` supplies only the ray direction, so its units/scale are
+    irrelevant. R_allo: [..., 3, 3]; t: [..., 3]."""
+    with torch.amp.autocast('cuda', enabled=False):
+        return _ray_align_rotation(t.float()) @ R_allo.float()
+
+
+def egocentric_to_allocentric(R_ego, t):
+    """Inverse of allocentric_to_egocentric: R_allo = R_ray(t)^T @ R_ego."""
+    with torch.amp.autocast('cuda', enabled=False):
+        return _ray_align_rotation(t.float()).transpose(-1, -2) @ R_ego.float()
+
+
+ROT_REPRS = ('ego', 'allo')
+
+
+def check_rot_repr(rot_repr):
+    """'ego': the network regresses the camera-frame rotation (released checkpoints).
+    'allo': it regresses the allocentric rotation; R_ego = R_ray(t) @ R_allo with the GT translation
+    in training and the predicted translation at inference."""
+    assert rot_repr in ROT_REPRS, f"rot_repr must be one of {ROT_REPRS}, got {rot_repr!r}"
+    return rot_repr

@@ -9,7 +9,7 @@ import torch
 import numpy as np
 from scipy.optimize import linear_sum_assignment as scipy_linear_sum_assignment
 
-from .utils import inverse_sigmoid
+from .utils import inverse_sigmoid, allocentric_to_egocentric
 from .box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
 
@@ -161,8 +161,10 @@ def _get_symmetry_type(label_id, models_info):
 @torch.amp.autocast('cuda', enabled=False)
 def _match_enc_to_gt(targets, enc_bboxes, enc_trans, enc_rots,
                      points_3d_cache, models_info, mscoco_label2category,
-                     img_w, img_h):
+                     img_w, img_h, rot_repr='ego'):
     """Match encoder predictions to GT using ADD/ADD-R cost.
+    rot_repr='allo': encoder rotations are allocentric and are mapped to egocentric with their own
+    predicted translation direction (as at inference) before the cost.
 
     Returns:
         matched_enc_indices: list[Tensor] — per-batch [N_gt] encoder index matched to each GT
@@ -186,6 +188,8 @@ def _match_enc_to_gt(targets, enc_bboxes, enc_trans, enc_rots,
         cam_K = targets[b]['cam_K'][0].reshape(3, 3)
         enc_t_3d = _enc_trans_to_3d(enc_trans[b], cam_K, enc_bboxes[b], img_w, img_h)  # [N_enc, 3] mm
         enc_R_b = enc_rots[b]  # [N_enc, 3, 3]
+        if rot_repr == 'allo':
+            enc_R_b = allocentric_to_egocentric(enc_R_b, enc_t_3d)
         N_enc = enc_R_b.shape[0]
 
         # Cost matrix [N_enc, N_gt]
@@ -244,6 +248,7 @@ def get_pose_denoising_training_group(
     num_denoising=100,
     label_noise_ratio=0.5,
     box_noise_scale=1.0,
+    rot_repr='ego',
 ):
     """Pose-aware contrastive denoising training.
 
@@ -280,7 +285,7 @@ def get_pose_denoising_training_group(
     matched_enc_indices = _match_enc_to_gt(
         targets, enc_topk_bboxes, enc_topk_trans, enc_topk_rots,
         points_3d_cache, models_info, mscoco_label2category,
-        img_w, img_h)
+        img_w, img_h, rot_repr=rot_repr)
 
     # === 2. Pad GT + matched encoder features ===
     input_query_class = torch.full([bs, max_gt_num], num_classes, dtype=torch.int32, device=device)
