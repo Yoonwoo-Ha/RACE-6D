@@ -2,10 +2,17 @@ __include__: [
   '../../dataset/coco_detection.yml',
   '../../runtime.yml',
   '../include/dataloader.yml',
-  '../include/optimizer.yml',
   '../include/race6d_r50vd_best.yml',
 ]
 
+# Training recipe of the released YCB-V RGB-D checkpoint (trained 2025-11 with the legacy code; the
+# released weights were then migrated to this code base, LQE removed): 50 queries, legacy activations,
+# pose loss 20 (encoder 15), no geometric aug, MultiStep 121 epochs (LR x0.1 at 101) after a 2000-iter
+# linear warmup, batch 32 over PBR + real.
+# Objects 19/20 are trained in the aligned frame: run sub/process_models.py (PLY) and sub/process_scene_gt.py
+# (scene_gt) before building the COCO annotations, and keep need_aligned False (True would shift the poses twice).
+# (The 2025-11 run used need_aligned True on annotations that are no longer available.)
+# The released checkpoint was taken at epoch 77. Use race6d_r50vd_ycbv_rgbd_bop.yml for inference.
 output_dir: ./output/race6d_r50vd_ycbv_rgbd
 coco_path: ~/Downloads/ycbv/
 category_file: ./configs/race6d/include/ycbv2coco_category.yml
@@ -43,21 +50,30 @@ RACE6DTransformer_DQE:
   num_points: [3, 6, 3]
   num_layers: 3
   vis_enc: True
-  num_queries: 20
+  num_queries: 50
+  # Inference/eval output layer (training always uses every layer); the legacy RGB-D CSV used the last layer.
   eval_idx: -1
-  activation: quick_gelu
+  dropout: 0.0
+  activation: relu
   mlp_act: quick_gelu
+  enc_mlp_act: relu
+  dec_mlp_act: quick_gelu
 
 RACE6DPostProcessor:
-  num_top_queries: 20
+  num_top_queries: 50
   vis_enc: True
   remap_mscoco_category: False
+  # Objects 19/20 are trained in the aligned frame (sub/process_models.py shifts their meshes by -P).
+  # When cam_K is given (bop.py) the postprocessor returns their poses in the original BOP frame (t - R@P).
+  aligned_offsets: {19: [10.4796698, -5.41739619, -1.23077576], 20: [-8.82785585, -10.93032056, 0.09932552]}
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 20}
+  enc_weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 15}
+  # pose before keypoint: the keypoint loss reuses the symmetry index chosen by the pose loss (legacy order was keypoint, pose).
   losses: ['vfl', 'boxes', 'pose', 'keypoint']
   alpha: 0.75
-  gamma_pos: 1.0
+  gamma_pos: 2.0
   gamma_neg: 2.0
 
   matcher:
@@ -66,31 +82,35 @@ RACE6DCriterion_addr:
     alpha: 0.25
     gamma: 2.0
 
+# ../include/optimizer.yml is not included: its FlatCosine lr_scheduler keys would be merged into MultiStepLR.
+use_amp: True
+use_ema: True
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  warmups: 2000
+clip_max_norm: 0.1
+
 optimizer:
   type: AdamW
   params:
     - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
-    - params: '^(?=.*backbone)(?!.*norm).*$'
-      lr: 0.00005
-    - params: ^(?=.*score_head).*$
-      lr: 8.0e-05
 
   lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 80
+epoches: 121
 
 lr_scheduler:
-  type: FlatCosineAnnealingLR
-  T_max: 80
-  lr_gamma: 0.5
-  warmup_iter: 1000
-  flat_epochs: 5
-  no_aug_epochs: 20
-  group_flat_epochs:
-    2: 0
+  type: MultiStepLR
+  milestones: [101]
+  gamma: 0.1
+
+lr_warmup_scheduler:
+  type: LinearWarmup
+  warmup_duration: 2000
 
 train_dataloader:
   dataset:
@@ -101,18 +121,25 @@ train_dataloader:
         ann_file: ~/Downloads/ycbv/ycbv2coco_train_pbr_amodal/annotations/instances_train2017.json
         transforms:
           ops:
-            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-            - {type: GDRNPhotoAug, p: 0.8}
+            - {type: RandomCoarseDropout}
+            - {type: ColorJitter}
+            - {type: RandomHSVAdjust}
+            - {type: RandomSharpen}
+            - {type: RandomMotionBlur}
+            - {type: RandomGaussianBlur}
+            - {type: RandomGaussianNoise}
+            - {type: RandomAdditionalNoise}
             - {type: ConvertPILImage, dtype: 'float32', scale: True}
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
           policy:
             name: stop_epoch
-            epoch: [0, 99]
-            ops: [GDRNPhotoAug]
+            epoch: 121
+            ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
         return_masks: True
         return_full_masks: False
         remap_mscoco_category: True
         return_depth: True
+        depth_norm: meters
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
         need_aligned: False
@@ -121,24 +148,31 @@ train_dataloader:
         ann_file: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/annotations/instances_train2017.json
         transforms:
           ops:
-            - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-            - {type: GDRNPhotoAug, p: 0.8}
+            - {type: RandomCoarseDropout}
+            - {type: ColorJitter}
+            - {type: RandomHSVAdjust}
+            - {type: RandomSharpen}
+            - {type: RandomMotionBlur}
+            - {type: RandomGaussianBlur}
+            - {type: RandomGaussianNoise}
+            - {type: RandomAdditionalNoise}
             - {type: ConvertPILImage, dtype: 'float32', scale: True}
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
           policy:
             name: stop_epoch
-            epoch: [0, 99]
-            ops: [GDRNPhotoAug]
+            epoch: 121
+            ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
         return_masks: True
         return_full_masks: False
         remap_mscoco_category: True
         return_depth: True
+        depth_norm: meters
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
         need_aligned: False
   collate_fn:
     scales: ~
-  total_batch_size: 16
+  total_batch_size: 32
 
 val_dataloader:
   dataset:
@@ -153,6 +187,7 @@ val_dataloader:
     return_full_masks: False
     remap_mscoco_category: True
     return_depth: True
+    depth_norm: meters
     category_file: ./configs/race6d/include/ycbv2coco_category.yml
     coco_path: ~/Downloads/ycbv/
     need_aligned: False

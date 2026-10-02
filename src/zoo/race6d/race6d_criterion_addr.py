@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torchvision
 import copy
 from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+from .utils import allocentric_to_egocentric, check_rot_repr
 from ...misc.dist_utils import get_world_size, is_dist_available_and_initialized
 from ...core import register
 
@@ -21,7 +22,7 @@ class RACE6DCriterion_addr(nn.Module):
         1) Compute Hungarian matching between model outputs and ground-truth boxes
         2) Supervise each matched pair (both class and box)
     """
-    __share__ = ['num_classes']
+    __share__ = ['num_classes', 'rot_repr']
     __inject__ = ['matcher']
 
     def __init__(self, \
@@ -38,6 +39,7 @@ class RACE6DCriterion_addr(nn.Module):
         enc_weight_dict=None,
         pose_quality_scale=0.2,
         compute_aux_metrics=True,
+        rot_repr='ego',
         **kwargs):
         """
         Parameters:
@@ -46,6 +48,8 @@ class RACE6DCriterion_addr(nn.Module):
             weight_dict: dict with loss names as keys and their relative weights as values
             losses: list of all losses to apply
             boxes_weight_format: format of the box weight
+            rot_repr: 'ego' (camera-frame rotation) or 'allo' (allocentric; mapped to ego with the
+                GT translation direction before every rotation loss)
         """
         super().__init__()
         self.num_classes = num_classes
@@ -59,6 +63,7 @@ class RACE6DCriterion_addr(nn.Module):
         self.pose_quality_scale = float(pose_quality_scale)
         self.share_matched_indices = share_matched_indices
         self.compute_aux_metrics = bool(compute_aux_metrics)
+        self.rot_repr = check_rot_repr(rot_repr)
         self.alpha = alpha
         self.gamma = gamma
         # For MAL/VFL: positive target uses gamma_pos, negative weight uses gamma_neg
@@ -101,6 +106,13 @@ class RACE6DCriterion_addr(nn.Module):
                 sym_cache=self.sym_cache,
                 mscoco_label2category=self.mscoco_label2category,
             )
+
+    def _rot_pred_to_ego(self, R, t):
+        """Predicted rotation -> egocentric. Identity for rot_repr='ego'; for 'allo',
+        R_ego = R_ray(t) @ R_allo (t: translation in any unit, only its direction is used)."""
+        if self.rot_repr == 'allo':
+            return allocentric_to_egocentric(R, t)
+        return R
 
     def _get_orig_size(self, targets):
         """Return the original image size (w, h) from targets.
@@ -647,6 +659,7 @@ class RACE6DCriterion_addr(nn.Module):
         # Predictions (bbox-relative → m)
         orig_w, orig_h = self._get_orig_size(targets)
         src_rotations = outputs['pred_rotations'][idx].reshape(-1, 3, 3)
+        src_rotations = self._rot_pred_to_ego(src_rotations, target_translations)
         src_boxes = outputs['pred_boxes'][idx].detach()
         src_translations = self._c2t_pred(outputs['pred_translations'][idx], cam_K, src_boxes, orig_w, orig_h) / 1000.0  # mm → m
 
@@ -1032,6 +1045,7 @@ class RACE6DCriterion_addr(nn.Module):
 
         cam_K = torch.cat([t['cam_K'][j] for t, (_, j) in zip(targets, indices)], dim=0).reshape(-1, 3, 3)
         t_gt_mm = self._c2t_gt(target_poses[:, :3], cam_K)
+        pred_R = self._rot_pred_to_ego(pred_R, t_gt_mm)
         orig_w, orig_h = self._get_orig_size(targets)
         pred_boxes = outputs['pred_boxes'][idx].detach()
         t_pred_mm = self._c2t_pred(

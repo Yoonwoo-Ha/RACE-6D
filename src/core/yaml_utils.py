@@ -19,9 +19,13 @@ __all__ = [
 INCLUDE_KEY = '__include__'
 
 
-def load_config(file_path, cfg=dict()):
+def load_config(file_path, cfg=None):
     """load config
     """
+    # A fresh dict per top-level call: a shared default dict leaked keys between
+    # configs loaded in the same process.
+    if cfg is None:
+        cfg = dict()
     _, ext = os.path.splitext(file_path)
     assert ext in ['.yml', '.yaml'], "only support yaml files"
 

@@ -15,6 +15,7 @@ import torchvision
 from pytorch3d.transforms import rotation_6d_to_matrix
 
 from ...core import register
+from .utils import egocentric_to_allocentric, check_rot_repr
 
 
 def box_cxcywh_to_xyxy(boxes):
@@ -43,10 +44,17 @@ class HungarianMatcher(torch.nn.Module):
     Costs: classification + bbox L1 + GIoU [+ log-tz + geodesic rotation]
 
     cost_tz and cost_rot default to 0 (disabled). Enable via weight_dict.
+    iou_threshold > 0 drops matched pairs whose box IoU is below it (0 = keep all).
     sym_cache is injected by the criterion via set_pose_source() after init.
+    rot_repr='allo' (shared config key): the rotation cost compares the predicted allocentric rotation
+    with the GT rotation converted to allocentric (same geodesic as comparing in the ego frame).
     """
-    def __init__(self, weight_dict, use_focal_loss=True, alpha=0.25, gamma=2.0):
+    __share__ = ['rot_repr']
+
+    def __init__(self, weight_dict, use_focal_loss=True, alpha=0.25, gamma=2.0, iou_threshold=0.0, rot_repr='ego'):
         super().__init__()
+        self.rot_repr = check_rot_repr(rot_repr)
+        self.iou_threshold = float(iou_threshold)
         self.cost_class = weight_dict['cost_class']
         self.cost_bbox  = weight_dict.get('cost_bbox', 5.0)
         self.cost_giou  = weight_dict.get('cost_giou', 2.0)
@@ -149,12 +157,17 @@ class HungarianMatcher(torch.nn.Module):
         # ---- Geodesic rotation cost (optional, symmetry-aware) ----
         cost_rot = None
         if self.cost_rot > 0 and 'pred_rotations' in outputs:
-            out_R = rotation_6d_to_matrix(
-                outputs['pred_rotations'].flatten(0, 1)  # [B*Q, 6]
-            )  # [B*Q, 3, 3]
+            pred_rot = outputs['pred_rotations'].flatten(0, 1).float()
+            if pred_rot.shape[-1] == 6:
+                out_R = rotation_6d_to_matrix(pred_rot)  # [B*Q, 3, 3]
+            else:
+                out_R = pred_rot.reshape(-1, 3, 3)       # decoder outputs flattened 3x3
             tgt_R_all = torch.cat(
                 [v['poses'][:, 3:].reshape(-1, 3, 3) for v in targets]
             ).to(device)  # [sum_T, 3, 3]
+            if self.rot_repr == 'allo':
+                tgt_t_all = torch.cat([v['poses'][:, :3] for v in targets]).to(device)
+                tgt_R_all = egocentric_to_allocentric(tgt_R_all, tgt_t_all)
             tgt_labels_all = [int(l) for v in targets for l in v['labels'].tolist()]
             cost_rot = self._geodesic_cost(out_R, tgt_R_all, tgt_labels_all, device)
             # [B*Nq, B*Nt]
@@ -198,7 +211,14 @@ class HungarianMatcher(torch.nn.Module):
             rows = row_indices[i][valid_mask]
             cols = col_indices[i][valid_mask]
 
-            # indices: no filter (for cls/bbox bootstrap — VFL handles IoU=0 automatically)
+            # Optional IoU filter (the released TUD-L checkpoint used 0.25); by default no filter
+            # (for cls/bbox bootstrap — VFL handles IoU=0 automatically).
+            if self.iou_threshold > 0 and len(rows) > 0:
+                pred_xyxy = box_cxcywh_to_xyxy(outputs["pred_boxes"][i][rows])
+                tgt_xyxy = box_cxcywh_to_xyxy(targets[i]["boxes"][cols])
+                ious = torch.diag(torchvision.ops.box_iou(pred_xyxy, tgt_xyxy))
+                keep = ious >= self.iou_threshold
+                rows, cols = rows[keep], cols[keep]
             all_indices.append((rows, cols))
 
         return {'indices': all_indices}

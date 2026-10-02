@@ -102,8 +102,8 @@ train_dataloader:
     ann_file: ~/Downloads/lmo/lmo2coco_train_pbr_amodal/annotations/instances_train2017.json
     transforms:
       ops:
+        - {type: PoseAugmentation, per_instance: False, rotation_range: 20.0, zoom_range: [1.0, 1.0], p: 0.5, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-        - {type: RandomISPSimulation, p: 0.7}
         - {type: RandomCoarseDropout}
         - {type: ColorJitter} #ok
         - {type: RandomHSVAdjust} #ok
@@ -119,7 +119,7 @@ train_dataloader:
         epoch: [0, 99]
         ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
     return_masks: True
-    return_full_masks: False
+    return_full_masks: True
     remap_mscoco_category: True
     return_depth: False
     category_file: ./configs/race6d/include/lmo2coco_category.yml

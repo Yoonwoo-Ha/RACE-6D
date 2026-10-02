@@ -76,6 +76,20 @@ use a different location.
 
 Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_rgb.yml` to match your local layout. Each dataset directory must contain the `models/` folder (3D CAD models are loaded by the criterion at initialization).
 
+#### YCB-V objects 19 and 20
+
+RACE-6D trains YCB-V objects 19 and 20 in a model frame whose origin is moved to their symmetry centre `P`, so their
+symmetries become pure rotations. Prepare YCB-V in this order:
+
+1. Shift the meshes with `sub/process_models.py` (vertices `v - P`; run it on `models/` and `models_eval/`).
+2. Shift the ground-truth poses with `sub/process_scene_gt.py` (`t + R @ P`; set `base_folder` at the bottom of the
+   script and run it for every split you convert), then build the COCO annotations.
+   Keep `need_aligned: False` in the configs; `True` would shift the poses a second time.
+3. Build the keypoint cache (`sub/test_kpt.ipynb`) from the shifted `models_eval/`.
+
+At inference, the postprocessor maps these two objects back to the original BOP model frame (`t - R @ P`, set by
+`aligned_offsets` in the YCB-V configs) when it is called with `cam_K`, so BOP results use the original BOP models.
+
 ## 🧠 Pretrained Checkpoints
 
 The following downloads contain the inference EMA weights only. Optimizer,
@@ -86,11 +100,14 @@ excluded, reducing each file to approximately 147–148 MiB.
 |---------|-------|-------:|---------------:|--------|------------|
 | LM-O | RGB | 0.669 | 50 | `race6d_r50vd_lmo_rgb.yml` | [Download](https://drive.google.com/open?id=1g_IsNnAqK-As_aamRnGbPfW2WWTLebF0) |
 | YCB-V | RGB | 0.782 | 66 | `race6d_r50vd_ycbv_rgb_bop.yml` | [Download](https://drive.google.com/open?id=10JNTL6LkrGGiqn6Ko8JeUW29ImbN99fV) |
+| YCB-V | RGB-D | 0.804* | 77 | `race6d_r50vd_ycbv_rgbd_bop.yml` | [Download](https://drive.google.com/open?id=1N_nMRituv2VaNHlJqAgeJ-55iN37eFec) |
 | T-LESS | RGB | 0.680 | 30 | `race6d_r50vd_tless_rgb.yml` | [Download](https://drive.google.com/open?id=1fxOaN2ANZjzDdR_StzLu-RtbBxspAwWp) |
 | T-LESS | RGB-D | 0.755 | 27 | `race6d_r50vd_tless_rgbd.yml` | [Download](https://drive.google.com/open?id=1kRQrgiTLd3LSOJtuEIkMScQHUOwJD8AM) |
 | TUD-L | RGB | 0.802 | 34 | `race6d_r50vd_tudl_rgb.yml` | [Download](https://drive.google.com/open?id=1RNi5PCUu6vc3aLlflsNnSgR_DGMiYfCa) |
 | HB | RGB | 0.682 | 40 | `race6d_r50vd_hb_rgb.yml` | [Download](https://drive.google.com/open?id=1X64A6GNxHD7bwQuJfPSBT7uNZiaGJgrW) |
 | IC-BIN | RGB | 0.597 | 29 | `race6d_r50vd_icbin_rgb.yml` | [Download](https://drive.google.com/open?id=1il8QATnF_mq0ihGVz5q8wOM5-SEggkSR) |
+
+\* Local evaluation with the BOP toolkit; not submitted to the BOP server.
 
 Evaluate an EMA-only checkpoint with the matching config:
 
@@ -103,6 +120,17 @@ python tools/train.py \
 For fine-tuning, load these weights with `-t`. They are not full training
 checkpoints and must not be used to resume optimizer state.
 
+Notes on the configs of the released checkpoints:
+
+- The configs reproduce the training settings of the released checkpoints. HB and TUD-L were trained with a
+  principal-point zoom augmentation that is now the zoom mode of `PoseAugmentation`; for objects cut by the image
+  border, `PoseAugmentation` recomputes the box from the in-frame amodal mask, as the dataset defines it.
+- The YCB-V checkpoints were trained with an earlier version of this code base; their weights were converted to the
+  current model with unchanged predictions. One config is used for training and inference; the `*_bop.yml`
+  variants only turn off the auxiliary outputs (`vis_enc: False`).
+- The YCB-V RGB-D model reads depth in meters (`depth_norm: meters` in the dataset config). The default,
+  `clip_zmax`, clips depth at `depth_z_max_mm` (2000 mm) and divides by it.
+
 The ITODD checkpoint is withheld pending re-evaluation on the official BOP
 server.
 
@@ -112,6 +140,7 @@ server.
 ```text
 668c57e08606dc335c7abdc50bf5f51d9272e97e572a9852dae2f5a343705258  race6d_r50vd_lmo_rgb_ema.pth
 a80f6732498f9212884a655b3bca0208731748385130d0f57407d9452da8d30b  race6d_r50vd_ycbv_rgb_ema.pth
+c1528c9a7d068401d05a4434befd41545edcc838fcb295b473275c4713eea1a5  race6d_r50vd_ycbv_rgbd_ema.pth
 03430ec1625f5eac3b37bd45c7dea56b901076bce4027d568fc9af0fed341cc7  race6d_r50vd_tless_rgb_ema.pth
 7f76b9e05a289f362fd0fe84710660c283a6192458031f348c8ccef9fb93eb6c  race6d_r50vd_tless_rgbd_ema.pth
 7121587403f50c80109700cf75ca1c24d332f0e6fdcf86a256114555a9bbcafd  race6d_r50vd_tudl_rgb_ema.pth
@@ -163,13 +192,30 @@ python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml \
     --test-only -r path/to/checkpoint.pth
 ```
 
-### 3. TensorBoard
+With `--test-only`, the evaluator reports COCO box metrics. For BOP-format results, call the postprocessor with the
+image intrinsics, `postprocessor(outputs, orig_target_sizes, cam_K=K)`: it then returns egocentric rotations and
+translations in millimeters in the original BOP model frame.
+
+### 3. Pose options
+
+| Key | Where | Values |
+|-----|-------|--------|
+| `rot_repr` | top level (shared by decoder, criterion, matcher and postprocessor) | `ego` (default, released checkpoints): the network regresses the camera-frame rotation. `allo`: it regresses the allocentric rotation, converted to egocentric with the translation direction (GT in training, prediction at inference). |
+| `depth_norm` | RGB-D dataset | `clip_zmax` (default) or `meters` |
+| `aligned_offsets` | `RACE6DPostProcessor` | `{category_id: [x, y, z]}` in mm, for objects trained in a shifted model frame (YCB-V 19/20) |
+| `iou_threshold` | `HungarianMatcher` | drops matched pairs whose box IoU is below it (`0`, the default, keeps all; TUD-L uses `0.25`) |
+| `eval_idx` | `RACE6DTransformer_DQE` | decoder layer used at inference (`-1` = last), also with `vis_enc: True` |
+
+`rot_repr: allo` needs `cam_K` in the postprocessor to return egocentric rotations; without it the raw allocentric
+rotation is returned.
+
+### 4. TensorBoard
 
 ```bash
 tensorboard --logdir=output/race6d_r50vd_lmo_rgb/summary/ --port=8989
 ```
 
-### 4. Export & profile
+### 5. Export & profile
 
 ```bash
 python tools/export_onnx.py -c config.yml -r checkpoint.pth --check

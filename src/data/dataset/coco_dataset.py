@@ -49,6 +49,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         need_aligned=False,
         depth_scale=10000,       # legacy, unused after the mm-based normalization
         depth_z_max_mm=2000.0,   # depth clip upper bound (mm); normalized to 1.0
+        depth_norm="clip_zmax",  # "clip_zmax" (default) or "meters" (legacy checkpoints, e.g. YCB-V RGB-D)
     ):
         self.img_folder = os.path.expanduser(img_folder)
         self.ann_file = os.path.expanduser(ann_file)
@@ -60,6 +61,9 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         self.return_depth = return_depth
         self.depth_scale = depth_scale
         self.depth_z_max_mm = float(depth_z_max_mm)
+        if depth_norm not in ("clip_zmax", "meters"):
+            raise ValueError(f"Unknown depth_norm: {depth_norm}")
+        self.depth_norm = depth_norm
         self.mscoco_category2name = None
         self.coco_path = os.path.expanduser(coco_path)
         self.need_aligned = need_aligned
@@ -444,6 +448,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         Flow: raw pixel --(x self._bop_depth_scale)--> mm
                        --(clip to [0, depth_z_max_mm])--> mm (clipped)
                        --(/ depth_z_max_mm)--> [0, 1]
+        With depth_norm="meters": mm --(/ 1000)--> meters, no clipping (legacy checkpoints).
 
         - Both train and test use the BOP annotation's `depth_scale` field (PBR=0.1, Real=1.0) to convert to actual mm.
         - Clip at Z_MAX_MM upper bound so PBR far backgrounds (~6m) are absorbed outside the test sensor range.
@@ -461,12 +466,15 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         # 1) Convert to actual mm via BOP depth_scale
         d_mm = d_raw * float(self._bop_depth_scale)
 
-        # 2) Clip at the physical upper bound (align background saturation)
-        z_max = float(self.depth_z_max_mm)
-        d_mm = np.clip(d_mm, 0.0, z_max)
+        if self.depth_norm == "meters":
+            d_norm = d_mm / 1000.0
+        else:
+            # 2) Clip at the physical upper bound (align background saturation)
+            z_max = float(self.depth_z_max_mm)
+            d_mm = np.clip(d_mm, 0.0, z_max)
 
-        # 3) Normalize to [0, 1]
-        d_norm = d_mm / z_max
+            # 3) Normalize to [0, 1]
+            d_norm = d_mm / z_max
 
         # 4) Hole handling: pixels where raw==0 remain 0 after normalization (sentinel)
         valid = np.isfinite(d_raw) & (d_raw > 0)

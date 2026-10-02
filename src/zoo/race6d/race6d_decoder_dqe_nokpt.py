@@ -22,6 +22,7 @@ from pytorch3d.transforms import rotation_6d_to_matrix
 from pytorch3d.ops import sample_farthest_points
 from .utils import deformable_attention_core_func_v2, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob, depth_ratio_weighting_focus_center, distance2depth
+from .utils import check_rot_repr
 
 from .denoising import get_pose_denoising_training_group
 from ...core import register
@@ -420,7 +421,7 @@ class TransformerDecoder(nn.Module):
 
 @register()
 class RACE6DTransformer_DQE_NoKpt(nn.Module):
-    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file']
+    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file', 'rot_repr']
 
     def __init__(self,
                  num_classes=80,
@@ -455,6 +456,7 @@ class RACE6DTransformer_DQE_NoKpt(nn.Module):
                  box_noise_scale=1.0,
                  r_min=0.5,
                  r_max=2.0,
+                 rot_repr='ego',
                  ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -481,6 +483,8 @@ class RACE6DTransformer_DQE_NoKpt(nn.Module):
         self.num_denoising = num_denoising
         self.label_noise_ratio = label_noise_ratio
         self.box_noise_scale = box_noise_scale
+        # 'ego' | 'allo': only the DN encoder-to-GT matching reads the rotation frame (see denoising.py)
+        self.rot_repr = check_rot_repr(rot_repr)
         if num_denoising > 0:
             self.denoising_class_embed = nn.Embedding(num_classes + 1, hidden_dim, padding_idx=num_classes)
             init.normal_(self.denoising_class_embed.weight[:-1])
@@ -1011,6 +1015,7 @@ class RACE6DTransformer_DQE_NoKpt(nn.Module):
                 num_denoising=self.num_denoising,
                 label_noise_ratio=self.label_noise_ratio,
                 box_noise_scale=self.box_noise_scale,
+                rot_repr=self.rot_repr,
             )
 
             if dn_result[0] is not None:

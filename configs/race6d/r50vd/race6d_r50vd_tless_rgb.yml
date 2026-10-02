@@ -68,8 +68,6 @@ RACE6DCriterion_addr:
 optimizer:
   type: AdamW
   params:
-    - params: '^(?=.*backbone)(?!.*norm).*$'
-      lr: 0.00005
     - params: '^(?=.*(?:norm|bn)).*$'
       weight_decay: 0.
       

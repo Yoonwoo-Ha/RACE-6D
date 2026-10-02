@@ -13,6 +13,7 @@ import os
 import yaml
 
 from ...core import register
+from .utils import allocentric_to_egocentric, check_rot_repr
 
 
 __all__ = ['RACE6DPostProcessor']
@@ -30,6 +31,7 @@ class RACE6DPostProcessor(nn.Module):
         'use_focal_loss',
         'num_top_queries',
         'category_file',
+        'rot_repr',
     ]
 
     def __init__(
@@ -40,7 +42,17 @@ class RACE6DPostProcessor(nn.Module):
         remap_mscoco_category=False,
         vis_enc=True,
         category_file=None,
+        aligned_offsets=None,
+        rot_repr='ego',
     ) -> None:
+        """
+        aligned_offsets: {category_id: [x, y, z] mm} for objects trained in an aligned model frame
+            (YCB-V 19/20: meshes shifted by -P with sub/process_models.py, poses by +R@P). When cam_K is
+            passed to forward(), their translations are returned in the original BOP frame (t - R@P).
+        rot_repr: 'ego' or 'allo' (shared config key). For 'allo', the predicted rotation is converted to
+            egocentric with the predicted translation direction when cam_K is passed to forward();
+            without cam_K the raw allocentric rotation is returned.
+        """
         super().__init__()
         self.use_focal_loss = use_focal_loss
         self.num_top_queries = num_top_queries
@@ -48,6 +60,7 @@ class RACE6DPostProcessor(nn.Module):
         self.remap_mscoco_category = remap_mscoco_category
         self.deploy_mode = False
         self.vis_enc = vis_enc
+        self.rot_repr = check_rot_repr(rot_repr)
 
         # Load category mapping from YAML
         if category_file is not None and os.path.exists(category_file):
@@ -66,10 +79,37 @@ class RACE6DPostProcessor(nn.Module):
                 lut[label] = cat
             self.register_buffer('_label2cat_lut', lut)
 
+        # Per-label model-frame offsets (non-persistent: checkpoints are unaffected)
+        self.has_aligned_offsets = bool(aligned_offsets)
+        if self.has_aligned_offsets:
+            offsets = torch.zeros(max(self.num_classes, len(self.mscoco_category2label)), 3)
+            for cat, p in aligned_offsets.items():
+                if int(cat) in self.mscoco_category2label:
+                    offsets[self.mscoco_category2label[int(cat)]] = torch.tensor(p, dtype=torch.float32)
+            self.register_buffer('_aligned_offsets', offsets, persistent=False)
+
     def extra_repr(self) -> str:
         return f'use_focal_loss={self.use_focal_loss}, num_classes={self.num_classes}, num_top_queries={self.num_top_queries}'
 
-    def forward(self, outputs, orig_target_sizes: torch.Tensor):
+    @staticmethod
+    def _translation_mm(translations, boxes_pixel, cam_K):
+        """bbox-relative (rx, ry, log_tz[m]) -> camera-frame translation in mm (same as bop.py's former _c2t)."""
+        K = cam_K if cam_K.dim() == 3 else cam_K.unsqueeze(0)
+        K = K.reshape(-1, 3, 3).to(translations.dtype)
+        fx, fy = K[:, 0, 0, None], K[:, 1, 1, None]
+        px, py = K[:, 0, 2, None], K[:, 1, 2, None]
+        rx, ry, log_tz = translations[..., 0], translations[..., 1], translations[..., 2]
+        cx, cy = (boxes_pixel[..., 0] + boxes_pixel[..., 2]) * 0.5, (boxes_pixel[..., 1] + boxes_pixel[..., 3]) * 0.5
+        w, h = boxes_pixel[..., 2] - boxes_pixel[..., 0], boxes_pixel[..., 3] - boxes_pixel[..., 1]
+        tz = torch.exp(log_tz) * 1000.0
+        tx = ((rx * w + cx - px) * tz) / fx
+        ty = ((ry * h + cy - py) * tz) / fy
+        return torch.stack([tx, ty, tz], dim=-1)
+
+    def forward(self, outputs, orig_target_sizes: torch.Tensor, cam_K=None):
+        """cam_K (optional, [3, 3] or [B, 3, 3]): if given, translations are returned in mm in the original
+        model frame (aligned_offsets reversed) and rotations are egocentric; otherwise the raw bbox-relative
+        (rx, ry, log_tz) and the rotation as regressed (allocentric for rot_repr='allo') are returned."""
         logits = outputs['pred_logits']
         boxes = outputs['pred_boxes']  # [B, N, 4] cxcywh normalized
 
@@ -122,6 +162,15 @@ class RACE6DPostProcessor(nn.Module):
             translations = outputs['pred_translations'].gather(
                 dim=1, index=query_indices.unsqueeze(-1).expand(-1, -1, 3)
             )
+            if cam_K is not None:
+                translations = self._translation_mm(translations, boxes_pixel, cam_K)
+                if self.rot_repr == 'allo':
+                    # the ray of the (aligned-frame) predicted translation, before the offsets are reversed
+                    rot_matrices = allocentric_to_egocentric(rot_matrices, translations)
+                if self.has_aligned_offsets:
+                    # labels are still label indices here (remap happens below)
+                    p = self._aligned_offsets[labels].to(translations.dtype)          # [B, K, 3]
+                    translations = translations - (rot_matrices.to(translations.dtype) @ p.unsqueeze(-1)).squeeze(-1)
 
         # Gather keypoints if available
         has_keypoints = 'pred_keypoints' in outputs

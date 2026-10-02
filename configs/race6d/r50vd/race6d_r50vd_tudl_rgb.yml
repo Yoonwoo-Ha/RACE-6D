@@ -64,9 +64,10 @@ RACE6DCriterion_addr:
 
   matcher:
     type: HungarianMatcher
-    weight_dict: {cost_class: 1, cost_bbox: 2, cost_giou: 1}
+    weight_dict: {cost_class: 1, cost_bbox: 2, cost_giou: 1, cost_tz: 2}
     alpha: 0.25
     gamma: 2.0
+    iou_threshold: 0.25
 
 optimizer:
   type: AdamW
@@ -104,8 +105,8 @@ train_dataloader:
         ann_file: ~/Downloads/tudl/tudl2coco_train_pbr_amodal/annotations/instances_train2017.json
         transforms:
           ops:
-            - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
+            - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter} #ok
             - {type: RandomHSVAdjust} #ok
@@ -135,8 +136,8 @@ train_dataloader:
           ops:
             # Real train tz is skewed (p95=1079) → zoom-out to cover a wider range.
             # Not added to policy.ops so it persists beyond epoch 25.
-            - {type: PoseAugmentation, per_instance: false, rotation_range: 0.0, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
+            - {type: PoseAugmentation, per_instance: false, rotation_range: 0.0, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter} #ok
