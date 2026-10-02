@@ -196,6 +196,10 @@ With `--test-only`, the evaluator reports COCO box metrics. For BOP-format resul
 image intrinsics, `postprocessor(outputs, orig_target_sizes, cam_K=K)`: it then returns egocentric rotations and
 translations in millimeters in the original BOP model frame.
 
+To also report BOP19 AR (VSD / MSSD / MSPD) after every epoch and with `--test-only`, add a `bop_eval` block to the
+config. It runs the official BOP toolkit and keeps the top-5 checkpoints by AR. See
+[src/solver/README.md](src/solver/README.md) for the paths it needs.
+
 ### 3. Pose options
 
 | Key | Where | Values |
