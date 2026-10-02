@@ -153,7 +153,7 @@ def process_all_folders(base_path):
 
 if __name__ == "__main__":
     dataset = "ycbv"
-    base_folder = f"/home/rise/Downloads/{dataset}/test_real"
+    base_folder = str(Path(f"~/Downloads/{dataset}/test_real").expanduser())
     
     # 또는 직접 경로 지정
     # base_folder = "/path/to/your/ycbv/test"

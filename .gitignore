@@ -17,7 +17,7 @@ build/
 output/
 pretrain/
 
-# Logs
+# Logs (also bop_log.txt, pose_train_log.txt, ...)
 *.log
 *_log.txt
 
@@ -27,7 +27,7 @@ lib/
 scripts/
 docs/
 
-# BOP results
+# BOP results written by local tools in the repository root
 bop_results/
 bop_eval_results/
 
@@ -54,12 +54,19 @@ bop_eval_results/
 .DS_Store
 Thumbs.db
 
+# Agent instruction files (local)
 AGENTS.md
-bop_log.txt
 CLAUDE.md
+
+# Local tools and scratch files (not published)
 bop.py
 test.py
 run_bop_tless_rgbd.py
+gen_bop_csv_driver.py
+viz_pose_video.py
+requirements-inference.txt
+.gjc/
+configs/race6d/r50vd/race6d_r50vd_itodd_rgb_nokpt_poseft.yml
 
 # Experimental backbones / encoders (not part of main model)
 src/nn/backbone/dinov3_dpt.py

@@ -27,6 +27,22 @@ COCO_EVAL_FIELDS = {
     'AR@L': 11,     # AR @ large
 }
 
+BOP_EVAL_FIELDS = {
+    "bop_vsd",
+    "bop_mssd",
+    "bop_mspd",
+    "bop_ar",
+}
+
+
+def _parse_log_field(field):
+    """Return the metric name and an optional explicit train/test split."""
+    for split in ("train", "test"):
+        prefix = f"{split}_"
+        if field.startswith(prefix):
+            return field[len(prefix):], split
+    return field, None
+
 
 def plot_logs(
     logs,
@@ -86,6 +102,7 @@ def plot_logs(
     ]
     higher_is_better.extend(["cls_accuracy", "gt_recall"])
     higher_is_better.extend(COCO_EVAL_FIELDS.keys())
+    higher_is_better.extend(BOP_EVAL_FIELDS)
     higher_is_better.extend(
         [
             "cls_auc",
@@ -191,15 +208,19 @@ def plot_logs(
                 df_interpolated = df.interpolate()
                 df_ewm = df_interpolated.ewm(com=ewm_col).mean()
 
-                is_higher_better = field in higher_is_better
+                metric_field, explicit_split = _parse_log_field(field)
+                is_higher_better = metric_field in higher_is_better
                 is_lower_better = not is_higher_better and (
-                    field.startswith("loss_")
-                    or field.startswith("metric_")
-                    or field in lower_is_better_extra
+                    metric_field.startswith("loss_")
+                    or metric_field.startswith("metric_")
+                    or metric_field in lower_is_better_extra
                 )
 
-                train_field = f"train_{field}"
-                if train_field in df_ewm.columns:
+                train_field = field if explicit_split == "train" else f"train_{field}"
+                if (
+                    explicit_split != "test"
+                    and train_field in df_ewm.columns
+                ):
                     train_plot_values = df_ewm[train_field]
                     axs[j].plot(
                         df_ewm.index,
@@ -211,8 +232,12 @@ def plot_logs(
                         label="Train",
                     )
 
-                test_field = f"test_{field}"
-                if test_field in df_ewm.columns and not df_ewm[test_field].isna().all():
+                test_field = field if explicit_split == "test" else f"test_{field}"
+                if (
+                    explicit_split != "train"
+                    and test_field in df_ewm.columns
+                    and not df_ewm[test_field].isna().all()
+                ):
                     test_values = df_ewm[test_field]
 
                     axs[j].plot(
@@ -294,7 +319,10 @@ def plot_logs(
             margin = (current_ymax - current_ymin) * 0.15
             ax.set_ylim(current_ymin - margin, current_ymax + margin)
 
-        if field in higher_is_better:
+        metric_field, _ = _parse_log_field(field)
+        if metric_field in BOP_EVAL_FIELDS:
+            ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
+        elif metric_field in higher_is_better:
             ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
 
     plt.tight_layout(pad=2.0)
@@ -357,6 +385,7 @@ def plot_logs_2x(
     higher_is_better = [f"{b}{s}" for b in _acc_bases for s in _acc_suffixes]
     higher_is_better.extend(["cls_accuracy", "gt_recall"])
     higher_is_better.extend(COCO_EVAL_FIELDS.keys())
+    higher_is_better.extend(BOP_EVAL_FIELDS)
     higher_is_better.extend(
         [
             "cls_auc",
@@ -463,14 +492,18 @@ def plot_logs_2x(
                 df_interpolated = df.interpolate()
                 df_ewm = df_interpolated.ewm(com=ewm_col).mean()
 
-                is_higher_better = field in higher_is_better
+                metric_field, explicit_split = _parse_log_field(field)
+                is_higher_better = metric_field in higher_is_better
                 is_lower_better = not is_higher_better and (
-                    field.startswith("loss_")
-                    or field.startswith("metric_")
-                    or field in lower_is_better_extra
+                    metric_field.startswith("loss_")
+                    or metric_field.startswith("metric_")
+                    or metric_field in lower_is_better_extra
                 )
-                train_field = f"train_{field}"
-                if train_field in df_ewm.columns:
+                train_field = field if explicit_split == "train" else f"train_{field}"
+                if (
+                    explicit_split != "test"
+                    and train_field in df_ewm.columns
+                ):
                     train_plot_values = df_ewm[train_field]
                     axs[j].plot(
                         df_ewm.index,
@@ -482,8 +515,12 @@ def plot_logs_2x(
                         label="Train",
                     )
 
-                test_field = f"test_{field}"
-                if test_field in df_ewm.columns and not df_ewm[test_field].isna().all():
+                test_field = field if explicit_split == "test" else f"test_{field}"
+                if (
+                    explicit_split != "train"
+                    and test_field in df_ewm.columns
+                    and not df_ewm[test_field].isna().all()
+                ):
                     test_values = df_ewm[test_field]
 
                     axs[j].plot(
@@ -565,11 +602,262 @@ def plot_logs_2x(
             margin = (current_ymax - current_ymin) * 0.15
             ax.set_ylim(current_ymin - margin, current_ymax + margin)
 
-        if field in higher_is_better:
+        metric_field, _ = _parse_log_field(field)
+        if metric_field in BOP_EVAL_FIELDS:
+            ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
+        elif metric_field in higher_is_better:
             ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
 
     plt.tight_layout(pad=2.0)
     plt.subplots_adjust(top=0.9, bottom=0.1, wspace=0.3)
+
+
+def _load_vs_logs(logs, labels=None, groups=None):
+    """Load JSON-lines comparison logs and attach display metadata."""
+    if not isinstance(logs, (list, tuple)) or not logs:
+        raise ValueError("logs must be a non-empty list of JSON-lines paths")
+
+    paths = [Path(path) for path in logs]
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"comparison log does not exist: {path}")
+
+    if labels is None:
+        labels = [path.stem for path in paths]
+    if groups is None:
+        groups = ["all"] * len(paths)
+    if len(labels) != len(paths) or len(groups) != len(paths):
+        raise ValueError("logs, labels, and groups must have equal lengths")
+
+    frames = []
+    for path, label, group in zip(paths, labels, groups):
+        frame = pd.read_json(path, lines=True)
+        frame["_vs_label"] = str(label)
+        frame["_vs_group"] = str(group)
+        frame["_vs_path"] = str(path)
+        frames.append(frame)
+    return frames
+
+
+def plot_logs_vs(
+    logs,
+    fields,
+    labels=None,
+    groups=None,
+    reducer="mean",
+    max_cols=4,
+):
+    """Compare aggregate log fields as grouped side-by-side bars.
+
+    Unlike :func:`plot_logs_2x`, this helper compares independent evaluation
+    logs instead of epoch curves. Each input file may contain one row per
+    image; ``reducer`` collapses those rows before plotting.
+
+    Args:
+        logs: JSON-lines file paths.
+        fields: Numeric columns to compare.
+        labels: Legend labels, e.g. ``["FP", "INT8", "FP", "INT8"]``.
+        groups: X-axis groups, e.g.
+            ``["No post", "No post", "Post TopK", "Post TopK"]``.
+        reducer: ``"mean"`` or ``"median"``.
+        max_cols: Maximum subplot columns.
+
+    Returns:
+        ``(fig, axs, summary_df)``.
+    """
+    if reducer not in {"mean", "median"}:
+        raise ValueError("reducer must be 'mean' or 'median'")
+    frames = _load_vs_logs(logs, labels=labels, groups=groups)
+    fields = list(fields)
+    if not fields:
+        raise ValueError("fields must not be empty")
+
+    rows = []
+    for frame in frames:
+        for field in fields:
+            if field not in frame:
+                raise KeyError(
+                    f"missing field '{field}' in {frame['_vs_path'].iloc[0]}"
+                )
+            values = pd.to_numeric(frame[field], errors="coerce").dropna()
+            value = (
+                values.mean() if reducer == "mean" else values.median()
+            )
+            rows.append(
+                {
+                    "field": field,
+                    "group": frame["_vs_group"].iloc[0],
+                    "label": frame["_vs_label"].iloc[0],
+                    "value": float(value),
+                    "images": int(len(values)),
+                }
+            )
+    summary = pd.DataFrame(rows)
+
+    unique_groups = list(dict.fromkeys(summary["group"]))
+    unique_labels = list(dict.fromkeys(summary["label"]))
+    ncols = min(max_cols, len(fields))
+    nrows = int(np.ceil(len(fields) / ncols))
+    fig, axs = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(4.8 * ncols, 4.0 * nrows),
+        squeeze=False,
+    )
+    palette = dict(
+        zip(unique_labels, sns.color_palette(n_colors=len(unique_labels)))
+    )
+    x = np.arange(len(unique_groups), dtype=np.float64)
+    width = 0.8 / max(len(unique_labels), 1)
+
+    for field, ax in zip(fields, axs.flat):
+        field_rows = summary[summary["field"] == field]
+        for label_index, label in enumerate(unique_labels):
+            values = []
+            for group in unique_groups:
+                match = field_rows[
+                    (field_rows["group"] == group)
+                    & (field_rows["label"] == label)
+                ]
+                values.append(
+                    float(match["value"].iloc[0]) if len(match) else np.nan
+                )
+            offset = (
+                label_index - (len(unique_labels) - 1) * 0.5
+            ) * width
+            bars = ax.bar(
+                x + offset,
+                values,
+                width=width,
+                label=label,
+                color=palette[label],
+                alpha=0.85,
+            )
+            ax.bar_label(bars, fmt="%.3f", padding=2, fontsize=8)
+        ax.set_title(field)
+        ax.set_xticks(x, unique_groups)
+        ax.grid(axis="y", alpha=0.2)
+
+    for ax in axs.flat[len(fields):]:
+        ax.set_visible(False)
+    handles, legend_labels = axs.flat[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            legend_labels,
+            loc="upper center",
+            ncols=len(unique_labels),
+            frameon=False,
+        )
+    fig.suptitle(f"Log comparison ({reducer})", y=1.01)
+    fig.tight_layout()
+    return fig, axs, summary
+
+
+def plot_logs_distribution_vs(
+    logs,
+    fields,
+    labels=None,
+    groups=None,
+    kind="ecdf",
+    bins=40,
+    clip_quantile=0.99,
+):
+    """Overlay per-image distributions, split into comparison groups.
+
+    ``kind="ecdf"`` is robust for long-tailed errors. ``kind="hist"`` draws
+    density-normalized step histograms. Quantile clipping is shared by every
+    label inside a group so FP/INT8 remain directly comparable.
+    """
+    if kind not in {"ecdf", "hist"}:
+        raise ValueError("kind must be 'ecdf' or 'hist'")
+    if clip_quantile is not None and not 0.0 < clip_quantile <= 1.0:
+        raise ValueError("clip_quantile must be in (0, 1]")
+
+    frames = _load_vs_logs(logs, labels=labels, groups=groups)
+    fields = list(fields)
+    unique_groups = list(
+        dict.fromkeys(frame["_vs_group"].iloc[0] for frame in frames)
+    )
+    unique_labels = list(
+        dict.fromkeys(frame["_vs_label"].iloc[0] for frame in frames)
+    )
+    palette = dict(
+        zip(unique_labels, sns.color_palette(n_colors=len(unique_labels)))
+    )
+    fig, axs = plt.subplots(
+        nrows=len(unique_groups),
+        ncols=len(fields),
+        figsize=(4.5 * len(fields), 3.6 * len(unique_groups)),
+        squeeze=False,
+    )
+
+    for row_index, group in enumerate(unique_groups):
+        group_frames = [
+            frame for frame in frames
+            if frame["_vs_group"].iloc[0] == group
+        ]
+        for column_index, field in enumerate(fields):
+            ax = axs[row_index, column_index]
+            value_sets = {}
+            for frame in group_frames:
+                if field not in frame:
+                    raise KeyError(
+                        f"missing field '{field}' in "
+                        f"{frame['_vs_path'].iloc[0]}"
+                    )
+                label = frame["_vs_label"].iloc[0]
+                value_sets[label] = pd.to_numeric(
+                    frame[field], errors="coerce"
+                ).dropna().to_numpy()
+
+            nonempty = [values for values in value_sets.values() if len(values)]
+            upper = None
+            if nonempty and clip_quantile is not None:
+                upper = float(
+                    np.quantile(np.concatenate(nonempty), clip_quantile)
+                )
+            for label, values in value_sets.items():
+                if upper is not None:
+                    values = values[values <= upper]
+                if not len(values):
+                    continue
+                if kind == "ecdf":
+                    ordered = np.sort(values)
+                    probability = (
+                        np.arange(1, len(ordered) + 1) / len(ordered)
+                    )
+                    ax.plot(
+                        ordered,
+                        probability,
+                        label=label,
+                        color=palette[label],
+                        linewidth=2,
+                    )
+                    ax.set_ylabel("CDF")
+                else:
+                    ax.hist(
+                        values,
+                        bins=bins,
+                        density=True,
+                        histtype="step",
+                        linewidth=2,
+                        label=label,
+                        color=palette[label],
+                    )
+                    ax.set_ylabel("Density")
+            suffix = (
+                f" (≤q{clip_quantile:.2f})"
+                if clip_quantile is not None and clip_quantile < 1.0
+                else ""
+            )
+            ax.set_title(f"{group}: {field}{suffix}")
+            ax.grid(alpha=0.2)
+            if row_index == 0 and column_index == 0:
+                ax.legend()
+
+    fig.tight_layout()
+    return fig, axs
 
 
 def plot_precision_recall(files, naming_scheme="iter"):

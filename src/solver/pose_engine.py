@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from ..optim import ModelEMA, Warmup
 from ..data import CocoEvaluator
 from ..misc import MetricLogger, SmoothedValue, dist_utils
+from .bop_evaluator import BOPPoseEvaluator
 
 import torch
 import numpy as np
@@ -148,8 +149,11 @@ def evaluate(
     data_loader,
     coco_evaluator: CocoEvaluator,
     device,
+    bop_eval_config=None,
+    output_dir=None,
+    epoch=None,
 ):
-    """Evaluation function — runs criterion loss and COCO eval only."""
+    """Run validation losses, COCO bbox evaluation, and optional BOP19 pose evaluation."""
     model.eval()
     criterion.eval()
     coco_evaluator.cleanup()
@@ -158,6 +162,19 @@ def evaluate(
 
     if coco_evaluator is not None and hasattr(coco_evaluator, "set_label_mapping"):
         coco_evaluator.set_label_mapping(mscoco_label2category)
+
+    bop_evaluator = None
+    if bop_eval_config and bop_eval_config.get("enabled", False):
+        if output_dir is None:
+            raise ValueError("output_dir is required when BOP evaluation is enabled")
+        bop_evaluator = BOPPoseEvaluator(
+            config=bop_eval_config,
+            coco_api=coco_evaluator.coco_gt,
+            label_to_category=mscoco_label2category,
+            labels_are_categories=getattr(postprocessor, "remap_mscoco_category", False),
+            output_dir=output_dir,
+            epoch=epoch,
+        )
 
     metric_logger = MetricLogger(delimiter="  ")
     header = "Test:"
@@ -180,11 +197,14 @@ def evaluate(
         metric_logger.update(loss=loss_value, **losses_reduced_eval)
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
-        results = postprocessor(outputs, orig_target_sizes)
+        # With cam_K the postprocessor returns BOP poses (mm, egocentric, original model frame); boxes are unchanged.
+        results = postprocessor(outputs, orig_target_sizes, cam_K=cam_K)
 
         res = {target["image_id"].item(): output for target, output in zip(targets, results)}
         if coco_evaluator is not None:
             coco_evaluator.update(res)
+        if bop_evaluator is not None:
+            bop_evaluator.update(targets, results)
 
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -201,5 +221,8 @@ def evaluate(
             stats["coco_eval_bbox"] = coco_evaluator.coco_eval["bbox"].stats.tolist()
         if "segm" in iou_types:
             stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
+
+    if bop_evaluator is not None:
+        stats.update(bop_evaluator.summarize())
 
     return stats, coco_evaluator
