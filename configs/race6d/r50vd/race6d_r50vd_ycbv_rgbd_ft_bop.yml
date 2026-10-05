@@ -1,0 +1,11 @@
+__include__: [
+  './race6d_r50vd_ycbv_rgbd_ft.yml',
+]
+
+# Inference config for the released YCB-V RGB-D (stage 2) weights. The training config gives the same
+# predictions (its eval_idx sets the output layer); this file only turns off the auxiliary outputs.
+RACE6DTransformer_DQE:
+  vis_enc: False
+
+RACE6DPostProcessor:
+  vis_enc: False
