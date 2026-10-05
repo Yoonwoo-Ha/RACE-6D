@@ -5,7 +5,7 @@ __include__: [
   '../include/race6d_r50vd_best.yml',
 ]
 
-# YCB-V RGB-D stage 2 (the released RGB-D checkpoint, BOP19 AR 0.8235): fine-tunes the stage-1 weights
+# YCB-V RGB-D stage 2 (the released RGB-D checkpoint, BOP19 AR 0.836, last epoch): fine-tunes the stage-1 weights
 # (race6d_r50vd_ycbv_rgbd.yml, released as race6d_r50vd_ycbv_rgbd_ema.pth) for 6 epochs:
 #   python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_ycbv_rgbd_ft.yml -t race6d_r50vd_ycbv_rgbd_ema.pth --use-amp
 # The LR follows an 80-epoch FlatCosine schedule (T_max 80) that stops after 6 epochs, as in the released run.

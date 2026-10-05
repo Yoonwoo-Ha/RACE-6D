@@ -100,7 +100,7 @@ excluded, reducing each file to approximately 147–148 MiB.
 |---------|-------|-------:|---------------:|--------|------------|
 | LM-O | RGB | 0.669 | 50 | `race6d_r50vd_lmo_rgb.yml` | [Download](https://drive.google.com/open?id=1g_IsNnAqK-As_aamRnGbPfW2WWTLebF0) |
 | YCB-V | RGB | 0.782 | 66 | `race6d_r50vd_ycbv_rgb_bop.yml` | [Download](https://drive.google.com/open?id=10JNTL6LkrGGiqn6Ko8JeUW29ImbN99fV) |
-| YCB-V | RGB-D | 0.824* | 77 + 6 | `race6d_r50vd_ycbv_rgbd_ft_bop.yml` | [Download](https://drive.google.com/open?id=18Ssq7_oxN4EkFdgtNLAIaLWMJWTJr-xX) |
+| YCB-V | RGB-D | 0.836* | 77 + 6 | `race6d_r50vd_ycbv_rgbd_ft_bop.yml` | [Download](https://drive.google.com/open?id=18Ssq7_oxN4EkFdgtNLAIaLWMJWTJr-xX) |
 | YCB-V | RGB-D (stage 1) | 0.804* | 77 | `race6d_r50vd_ycbv_rgbd_bop.yml` | [Download](https://drive.google.com/open?id=1N_nMRituv2VaNHlJqAgeJ-55iN37eFec) |
 | T-LESS | RGB | 0.680 | 30 | `race6d_r50vd_tless_rgb.yml` | [Download](https://drive.google.com/open?id=1fxOaN2ANZjzDdR_StzLu-RtbBxspAwWp) |
 | T-LESS | RGB-D | 0.755 | 27 | `race6d_r50vd_tless_rgbd.yml` | [Download](https://drive.google.com/open?id=1kRQrgiTLd3LSOJtuEIkMScQHUOwJD8AM) |
@@ -146,7 +146,7 @@ server.
 668c57e08606dc335c7abdc50bf5f51d9272e97e572a9852dae2f5a343705258  race6d_r50vd_lmo_rgb_ema.pth
 c83bffa2e5f3a7f1e0a73def9ac0ccc28e55d959fb334e2f0e23dda9547a9ae3  race6d_r50vd_ycbv_rgb_ema.pth
 c1528c9a7d068401d05a4434befd41545edcc838fcb295b473275c4713eea1a5  race6d_r50vd_ycbv_rgbd_ema.pth
-354d7a477bfbae6234c45b6bbc0cf12f21d8540a28f0b8f429aa2db5d9833a62  race6d_r50vd_ycbv_rgbd_ft_ema.pth
+adf07ecfb2323b520321f912ff3a40be77de2be578e71f5173c103bb0e825bbd  race6d_r50vd_ycbv_rgbd_ft_ema.pth
 03430ec1625f5eac3b37bd45c7dea56b901076bce4027d568fc9af0fed341cc7  race6d_r50vd_tless_rgb_ema.pth
 7f76b9e05a289f362fd0fe84710660c283a6192458031f348c8ccef9fb93eb6c  race6d_r50vd_tless_rgbd_ema.pth
 7121587403f50c80109700cf75ca1c24d332f0e6fdcf86a256114555a9bbcafd  race6d_r50vd_tudl_rgb_ema.pth
