@@ -83,15 +83,14 @@ optimizer:
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 40
+epoches: 100
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 40
+  T_max: 50
   lr_gamma: 0.5
   warmup_iter: 1000
   flat_epochs: 5
-  no_aug_epochs: 15
   group_flat_epochs:
     1: 0
 
@@ -117,11 +116,7 @@ train_dataloader:
             - {type: RandomAdditionalNoise} #ok
             - {type: ConvertPILImage, dtype: 'float32', scale: True}
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-          policy:
-            name: stop_epoch
-            epoch: [0, 25]
-            ops: [BackgroundReplacement, RandomCoarseDropout, ColorJitter, RandomHSVAdjust,
-                  RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
+          policy: {name: default}
         return_masks: True
         return_full_masks: False
         remap_mscoco_category: True
@@ -135,9 +130,8 @@ train_dataloader:
         transforms:
           ops:
             # Real train tz is skewed (p95=1079) → zoom-out to cover a wider range.
-            # Not added to policy.ops so it persists beyond epoch 25.
+            - {type: PoseAugmentation, per_instance: false, rotation_range: 20.0, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-            - {type: PoseAugmentation, per_instance: false, rotation_range: 0.0, zoom_range: [0.6, 1.1], p: 0.7, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: BackgroundReplacement, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/, p: 0.5}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter} #ok
@@ -149,11 +143,7 @@ train_dataloader:
             - {type: RandomAdditionalNoise} #ok
             - {type: ConvertPILImage, dtype: 'float32', scale: True}
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-          policy:
-            name: stop_epoch
-            epoch: [0, 25]
-            ops: [BackgroundReplacement, RandomCoarseDropout, ColorJitter, RandomHSVAdjust,
-                  RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
+          policy: {name: default}
         return_masks: True
         return_full_masks: True
         remap_mscoco_category: True

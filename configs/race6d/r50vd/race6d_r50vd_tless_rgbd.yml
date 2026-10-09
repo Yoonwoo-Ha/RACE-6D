@@ -50,6 +50,7 @@ RACE6DTransformer_DQE:
   num_denoising: 0      # number of DN queries (0 = disabled)
   label_noise_ratio: 0.5
   box_noise_scale: 1.0
+  symmetry_override: {25: none, 26: none}
 
 RACE6DPostProcessor:
   num_top_queries: 50
@@ -87,11 +88,10 @@ epoches: 40
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 40
+  T_max: 25
   lr_gamma: 0.5
   warmup_iter: 100
   flat_epochs: 5
-  no_aug_epochs: 15
   group_flat_epochs:
     0: 0
     2: 0

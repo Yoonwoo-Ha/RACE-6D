@@ -3,9 +3,11 @@ __include__: [
 ]
 
 # Inference config for the released (migrated) YCB-V RGB weights. The training config already gives the same
-# predictions (its eval_idx sets the output layer); this file only turns off the auxiliary outputs.
+# predictions (its eval_idx sets the output layer); this file turns off the auxiliary outputs and sets the
+# objects 19/20 offsets the released weights were trained with (sub/README.md).
 RACE6DTransformer_DQE:
   vis_enc: False
 
 RACE6DPostProcessor:
   vis_enc: False
+  aligned_offsets: {19: [10.4796698, -5.41739619, -1.23077576], 20: [-8.82785585, -10.93032056, 0.09932552]}

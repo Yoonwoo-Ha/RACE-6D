@@ -5,18 +5,17 @@ __include__: [
   '../include/race6d_r50vd_best.yml',
 ]
 
-# YCB-V RGB-D stage 2 (the released RGB-D checkpoint, BOP19 AR 0.836, last epoch): fine-tunes the stage-1 weights
-# (race6d_r50vd_ycbv_rgbd.yml, released as race6d_r50vd_ycbv_rgbd_ema.pth) for 6 epochs:
-#   python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_ycbv_rgbd_ft.yml -t race6d_r50vd_ycbv_rgbd_ema.pth --use-amp
-# The LR follows an 80-epoch FlatCosine schedule (T_max 80) that stops after 6 epochs, as in the released run.
+# YCB-V RGB-D stage 2: fine-tunes the stage-1 weights (race6d_r50vd_ycbv_rgbd.yml) for 10 epochs:
+#   python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_ycbv_rgbd_ft.yml -t <stage-1 checkpoint> --use-amp
 # QuickGELU everywhere, depth clipped at 2000 mm and scaled to [0, 1] (depth_norm clip_zmax, the default),
-# pose loss 5 / gamma_pos 1.0, FilterSmallBoxLowVis + GDRNPhotoAug, batch 16 over PBR + real, 20 queries.
-# Objects 19/20 are trained in the aligned frame (see README, keep need_aligned False).
+# pose loss 5 / gamma_pos 1.0, batch 16 over PBR + real, 20 queries. The released stage-2 checkpoint (BOP19 AR 0.836)
+# used 6 epochs of a T_max 80 schedule from the released stage-1 checkpoint.
 output_dir: ./output/race6d_r50vd_ycbv_rgbd_ft
 coco_path: ~/Downloads/ycbv/
 category_file: ./configs/race6d/include/ycbv2coco_category.yml
 num_classes: 21
 eval_spatial_size: [480, 640]
+print_freq: 500
 
 RACE6D:
   backbone: PResNet_depth
@@ -61,7 +60,7 @@ RACE6DPostProcessor:
   remap_mscoco_category: False
   # Objects 19/20 are trained in the aligned frame (sub/process_models.py shifts their meshes by -P).
   # When cam_K is given (bop.py) the postprocessor returns their poses in the original BOP frame (t - R@P).
-  aligned_offsets: {19: [10.4796698, -5.41739619, -1.23077576], 20: [-8.82785585, -10.93032056, 0.09932552]}
+  aligned_offsets: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
 
 RACE6DCriterion_addr:
   weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
@@ -97,15 +96,14 @@ optimizer:
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 6
+epoches: 10
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 80
+  T_max: 10
   lr_gamma: 0.5
   warmup_iter: 1000
   flat_epochs: 5
-  no_aug_epochs: 20
   group_flat_epochs: {2: 0}
 
 train_dataloader:
@@ -118,40 +116,51 @@ train_dataloader:
         transforms:
           ops:
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-            - {type: GDRNPhotoAug, p: 0.8}
+            - {type: RandomCoarseDropout}
+            - {type: ColorJitter}
+            - {type: RandomHSVAdjust}
+            - {type: RandomSharpen}
+            - {type: RandomMotionBlur}
+            - {type: RandomGaussianBlur}
+            - {type: RandomGaussianNoise}
+            - {type: RandomAdditionalNoise}
             - {type: ConvertPILImage, dtype: 'float32', scale: True}
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-          policy:
-            name: stop_epoch
-            epoch: [0, 99]
-            ops: [GDRNPhotoAug]
+          policy: {name: default}
         return_masks: True
         return_full_masks: False
         remap_mscoco_category: True
         return_depth: True
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
-        need_aligned: False
+        need_aligned: True
+        paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
       - type: CocoDetection
         img_folder: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/train2017/
         ann_file: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/annotations/instances_train2017.json
         transforms:
           ops:
+            - {type: PoseAugmentation, per_instance: False, rotation_range: 20.0, zoom_range: [1.0, 1.0], p: 0.5, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
-            - {type: GDRNPhotoAug, p: 0.8}
+            - {type: RandomCoarseDropout}
+            - {type: ColorJitter}
+            - {type: RandomHSVAdjust}
+            - {type: RandomSharpen}
+            - {type: RandomMotionBlur}
+            - {type: RandomGaussianBlur}
+            - {type: RandomGaussianNoise}
+            - {type: RandomAdditionalNoise}
             - {type: ConvertPILImage, dtype: 'float32', scale: True}
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-          policy:
-            name: stop_epoch
-            epoch: [0, 99]
-            ops: [GDRNPhotoAug]
+          policy: {name: default}
         return_masks: True
-        return_full_masks: False
+        return_full_masks: True
         remap_mscoco_category: True
         return_depth: True
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
-        need_aligned: False
+        need_aligned: True
+        paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
   collate_fn:
     scales: ~
   total_batch_size: 16
@@ -171,6 +180,7 @@ val_dataloader:
     return_depth: True
     category_file: ./configs/race6d/include/ycbv2coco_category.yml
     coco_path: ~/Downloads/ycbv/
-    need_aligned: False
+    need_aligned: True
+    paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
   total_batch_size: 1
 

@@ -76,19 +76,22 @@ use a different location.
 
 Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_rgb.yml` to match your local layout. Each dataset directory must contain the `models/` folder (3D CAD models are loaded by the criterion at initialization).
 
-#### YCB-V objects 19 and 20
+#### HB validation set
 
-RACE-6D trains YCB-V objects 19 and 20 in a model frame whose origin is moved to their symmetry centre `P`, so their
-symmetries become pure rotations. Prepare YCB-V in this order:
+The HB BOP test ground truth is not public, so the HB config evaluates on 102 images of the HB validation split
+(`val_primesense`, scenes 3, 5 and 13, every 10th image), the scenes of the BOP test set:
 
-1. Shift the meshes with `sub/process_models.py` (vertices `v - P`; run it on `models/` and `models_eval/`).
-2. Shift the ground-truth poses with `sub/process_scene_gt.py` (`t + R @ P`; set `base_folder` at the bottom of the
-   script and run it for every split you convert), then build the COCO annotations.
-   Keep `need_aligned: False` in the configs; `True` would shift the poses a second time.
-3. Build the keypoint cache (`sub/test_kpt.ipynb`) from the shifted `models_eval/`.
+```bash
+python scripts/prepare_race6d_coco.py --dataset hb --split val --split_type primesense --use_all_gt \
+  --scene_ids 3,5,13 --image_ids $(seq -s, 0 10 330) --bbox_type amodal --image_mode copy --include_depth \
+  --output_dir ~/Downloads/hb/hb2coco_val_amodal
+```
 
-At inference, the postprocessor maps these two objects back to the original BOP model frame (`t - R @ P`, set by
-`aligned_offsets` in the YCB-V configs) when it is called with `cam_K`, so BOP results use the original BOP models.
+#### Objects with an off-origin symmetry axis
+
+YCB-V objects 19 and 20 and ITODD object 2 are trained in a model frame moved to a point `P` on their symmetry axis, so
+their symmetries become pure rotations. Prepare these datasets as described in [sub/README.md](sub/README.md). T-LESS
+objects 25 and 26 are trained as asymmetric objects (`symmetry_override`).
 
 ## 🧠 Pretrained Checkpoints
 
@@ -98,9 +101,9 @@ excluded, reducing each file to approximately 147–148 MiB.
 
 | Dataset | Input | BOP AR | Training epoch | Config | Checkpoint |
 |---------|-------|-------:|---------------:|--------|------------|
-| LM-O | RGB | 0.669 | 50 | `race6d_r50vd_lmo_rgb.yml` | [Download](https://drive.google.com/open?id=1g_IsNnAqK-As_aamRnGbPfW2WWTLebF0) |
+| LM-O | RGB | 0.678* | 58 | `race6d_r50vd_lmo_rgb.yml` | [Download](https://drive.google.com/open?id=1g_IsNnAqK-As_aamRnGbPfW2WWTLebF0) |
 | YCB-V | RGB | 0.782 | 66 | `race6d_r50vd_ycbv_rgb_bop.yml` | [Download](https://drive.google.com/open?id=10JNTL6LkrGGiqn6Ko8JeUW29ImbN99fV) |
-| YCB-V | RGB-D | 0.836* | 77 + 6 | `race6d_r50vd_ycbv_rgbd_ft_bop.yml` | [Download](https://drive.google.com/open?id=18Ssq7_oxN4EkFdgtNLAIaLWMJWTJr-xX) |
+| YCB-V | RGB-D | 0.836 | 77 + 6 | `race6d_r50vd_ycbv_rgbd_ft_bop.yml` | [Download](https://drive.google.com/open?id=18Ssq7_oxN4EkFdgtNLAIaLWMJWTJr-xX) |
 | YCB-V | RGB-D (stage 1) | 0.804* | 77 | `race6d_r50vd_ycbv_rgbd_bop.yml` | [Download](https://drive.google.com/open?id=1N_nMRituv2VaNHlJqAgeJ-55iN37eFec) |
 | T-LESS | RGB | 0.680 | 30 | `race6d_r50vd_tless_rgb.yml` | [Download](https://drive.google.com/open?id=1fxOaN2ANZjzDdR_StzLu-RtbBxspAwWp) |
 | T-LESS | RGB-D | 0.755 | 27 | `race6d_r50vd_tless_rgbd.yml` | [Download](https://drive.google.com/open?id=1kRQrgiTLd3LSOJtuEIkMScQHUOwJD8AM) |
@@ -121,20 +124,13 @@ python tools/train.py \
 For fine-tuning, load these weights with `-t`. They are not full training
 checkpoints and must not be used to resume optimizer state.
 
-Notes on the configs of the released checkpoints:
+Notes:
 
-- The configs reproduce the training settings of the released checkpoints. HB and TUD-L were trained with a
-  principal-point zoom augmentation that is now the zoom mode of `PoseAugmentation`; for objects cut by the image
-  border, `PoseAugmentation` recomputes the box from the in-frame amodal mask, as the dataset defines it.
-- The YCB-V RGB and RGB-D stage-1 checkpoints were trained with an earlier version of this code base; their weights
-  were converted to the current model with unchanged predictions. One config is used for training and inference;
-  the `*_bop.yml` variants only turn off the auxiliary outputs (`vis_enc: False`).
-- YCB-V RGB-D is trained in two stages. Stage 1 (`race6d_r50vd_ycbv_rgbd.yml`) is released as
-  `race6d_r50vd_ycbv_rgbd_ema.pth`. Stage 2 fine-tunes it for 6 epochs of an 80-epoch FlatCosine schedule with
-  `race6d_r50vd_ycbv_rgbd_ft.yml`:
+- The YCB-V RGB and RGB-D stage-1 checkpoints were trained with an earlier version of this code base and converted to
+  the current model (same predictions).
+- YCB-V RGB-D is trained in two stages: stage 1 with `race6d_r50vd_ycbv_rgbd.yml` (released as
+  `race6d_r50vd_ycbv_rgbd_ema.pth`), then stage 2 for 6 epochs:
   `python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_ycbv_rgbd_ft.yml -t race6d_r50vd_ycbv_rgbd_ema.pth --use-amp`
-- YCB-V RGB-D stage 1 reads depth in meters (`depth_norm: meters` in the dataset config). Stage 2 uses the default,
-  `clip_zmax`, which clips depth at `depth_z_max_mm` (2000 mm) and divides by it.
 
 The ITODD checkpoint is withheld pending re-evaluation on the official BOP
 server.
@@ -143,7 +139,7 @@ server.
 <summary>SHA-256 checksums</summary>
 
 ```text
-668c57e08606dc335c7abdc50bf5f51d9272e97e572a9852dae2f5a343705258  race6d_r50vd_lmo_rgb_ema.pth
+0da8e618cd664e38a53fc62e8f1eee3965a46aa256f73530065dc8f9d472e34c  race6d_r50vd_lmo_rgb_ema.pth
 c83bffa2e5f3a7f1e0a73def9ac0ccc28e55d959fb334e2f0e23dda9547a9ae3  race6d_r50vd_ycbv_rgb_ema.pth
 c1528c9a7d068401d05a4434befd41545edcc838fcb295b473275c4713eea1a5  race6d_r50vd_ycbv_rgbd_ema.pth
 adf07ecfb2323b520321f912ff3a40be77de2be578e71f5173c103bb0e825bbd  race6d_r50vd_ycbv_rgbd_ft_ema.pth
@@ -206,15 +202,22 @@ To also report BOP19 AR (VSD / MSSD / MSPD) after every epoch and with `--test-o
 config. It runs the official BOP toolkit and keeps the top-5 checkpoints by AR. See
 [src/solver/README.md](src/solver/README.md) for the paths it needs.
 
+With a depth image, the postprocessor can also correct the distance of RGB predictions at test time (`depth_refine`,
+off by default); see [src/zoo/race6d/depth_refine.md](src/zoo/race6d/depth_refine.md).
+
 ### 3. Pose options
 
 | Key | Where | Values |
 |-----|-------|--------|
 | `rot_repr` | top level (shared by decoder, criterion, matcher and postprocessor) | `ego` (default, released checkpoints): the network regresses the camera-frame rotation. `allo`: it regresses the allocentric rotation, converted to egocentric with the translation direction (GT in training, prediction at inference). |
 | `depth_norm` | RGB-D dataset | `clip_zmax` (default) or `meters` |
-| `aligned_offsets` | `RACE6DPostProcessor` | `{category_id: [x, y, z]}` in mm, for objects trained in a shifted model frame (YCB-V 19/20) |
+| `aligned_offsets` | `RACE6DPostProcessor` | `{category_id: [x, y, z]}` in mm, for objects trained in a shifted model frame (YCB-V 19/20, ITODD 2) |
 | `iou_threshold` | `HungarianMatcher` | drops matched pairs whose box IoU is below it (`0`, the default, keeps all; TUD-L uses `0.25`) |
 | `eval_idx` | `RACE6DTransformer_DQE` | decoder layer used at inference (`-1` = last), also with `vis_enc: True` |
+| `depth_refine` | `RACE6DPostProcessor` | test-time depth refinement of the translation, see [depth_refine.md](src/zoo/race6d/depth_refine.md) (off by default) |
+| `need_aligned`, `paligned_values` | dataset | shift the poses of `paligned_values` objects (`{category_id: [x, y, z]}` in mm) to the shifted model frame when loading (YCB-V, ITODD) |
+| `symmetry_override` | `RACE6DTransformer_DQE` | `{category_id: none}` trains these objects as asymmetric, or a `{symmetries_discrete / symmetries_continuous}` dict replaces their symmetries in training; BOP evaluation keeps the official ones (T-LESS 25/26: `none`) |
+| `return_depth_mm` | dataset | adds the raw depth in mm (`target["depth_mm"]`) for `depth_refine` |
 
 `rot_repr: allo` needs `cam_K` in the postprocessor to return egocentric rotations; without it the raw allocentric
 rotation is returned.
@@ -224,6 +227,8 @@ rotation is returned.
 ```bash
 tensorboard --logdir=output/race6d_r50vd_lmo_rgb/summary/ --port=8989
 ```
+
+To overlay the epoch curves of several runs, use `plot_logs_vs` in `src/misc/plot_utils.py`.
 
 ### 5. Export & profile
 
@@ -286,6 +291,7 @@ race6d_r50vd_lmo_rgb.yml
 │   │   ├── race6d_decoder_dqe.py     # DQE decoder (core research)
 │   │   ├── race6d_criterion_addr.py  # ADD-S loss and matcher supervision
 │   │   ├── race6d_postprocessor.py   # Pose decoding at inference
+│   │   ├── depth_refine.py           # Test-time depth refinement (depth_refine.md)
 │   │   ├── matcher.py                # Hungarian matcher
 │   │   └── denoising.py              # Query denoising
 │   ├── solver/

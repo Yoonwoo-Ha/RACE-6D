@@ -86,15 +86,14 @@ optimizer:
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 50
+epoches: 60
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 50
+  T_max: 54
   lr_gamma: 0.5
   warmup_iter: 1000
-  flat_epochs: 5
-  no_aug_epochs: 10
+  flat_epochs: 30
 
 train_dataloader:
   dataset:
@@ -105,19 +104,16 @@ train_dataloader:
         - {type: PoseAugmentation, per_instance: False, rotation_range: 20.0, zoom_range: [1.0, 1.0], p: 0.5, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: RandomCoarseDropout}
-        - {type: ColorJitter} #ok
-        - {type: RandomHSVAdjust} #ok
-        - {type: RandomSharpen} #ok
-        - {type: RandomMotionBlur} #ok
-        - {type: RandomGaussianBlur} #ok
-        - {type: RandomGaussianNoise} #ok
-        - {type: RandomAdditionalNoise} #ok
+        - {type: ColorJitter}
+        - {type: RandomHSVAdjust}
+        - {type: RandomSharpen}
+        - {type: RandomMotionBlur}
+        - {type: RandomGaussianBlur}
+        - {type: RandomGaussianNoise}
+        - {type: RandomAdditionalNoise}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-      policy:
-        name: stop_epoch
-        epoch: [0, 99]
-        ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
+      policy: {name: default}
     return_masks: True
     return_full_masks: True
     remap_mscoco_category: True

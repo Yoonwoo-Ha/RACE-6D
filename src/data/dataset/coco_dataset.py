@@ -47,9 +47,11 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         category_file=None,
         coco_path=None,
         need_aligned=False,
+        paligned_values=None,    # {category_id: [x, y, z] mm}: points on the symmetry axis, used with need_aligned
         depth_scale=10000,       # legacy, unused after the mm-based normalization
         depth_z_max_mm=2000.0,   # depth clip upper bound (mm); normalized to 1.0
         depth_norm="clip_zmax",  # "clip_zmax" (default) or "meters" (legacy checkpoints, e.g. YCB-V RGB-D)
+        return_depth_mm=False,   # target["depth_mm"]: raw depth in mm at the original resolution (test-time refinement)
     ):
         self.img_folder = os.path.expanduser(img_folder)
         self.ann_file = os.path.expanduser(ann_file)
@@ -59,6 +61,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         self.return_full_masks = return_full_masks
         self.remap_mscoco_category = remap_mscoco_category
         self.return_depth = return_depth
+        self.return_depth_mm = return_depth_mm
         self.depth_scale = depth_scale
         self.depth_z_max_mm = float(depth_z_max_mm)
         if depth_norm not in ("clip_zmax", "meters"):
@@ -68,12 +71,8 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         self.coco_path = os.path.expanduser(coco_path)
         self.need_aligned = need_aligned
 
-        # Paligned value definitions (YCB-Video only)
-        # Based on the original category_id (before remap)
-        self.paligned_values = {
-            19: [10.4796698, -5.41739619, -1.23077576],  # original category_id
-            20: [-8.82785585, -10.93032056, 0.09932552],  # original category_id
-        }
+        # Paligned values: a point on the symmetry axis per original category_id (before remap)
+        self.paligned_values = {int(k): list(v) for k, v in (paligned_values or {}).items()}
 
         # Load category mapping from YAML
         if category_file is not None and os.path.exists(category_file):
@@ -98,7 +97,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         # BOP depth_scale: read from the depth_scale field in the annotation
         # PBR=0.1 (px*0.1=mm), Real=1.0 (px*1.0=mm)
         self._bop_depth_scale = 1.0
-        if self.return_depth:
+        if self.return_depth or self.return_depth_mm:
             ann_ids = self.coco.getAnnIds()
             if ann_ids:
                 first_ann = self.coco.loadAnns(ann_ids[:1])[0]
@@ -114,7 +113,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
 
         # Auto-determine depth_root from img_folder
         self.depth_root = None
-        if self.return_depth:
+        if self.return_depth or self.return_depth_mm:
             root = os.path.basename(os.path.normpath(self.img_folder))
             parent = os.path.dirname(os.path.normpath(self.img_folder))
             if root.endswith("2017"):
@@ -168,11 +167,17 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         # Clean up _depth_tensor (may be created inside transforms such as RendererAugmentation)
         target.pop("_depth_tensor", None)
 
+        # Raw depth for test-time refinement (after the transforms, which must not filter or resize it)
+        if self.return_depth_mm:
+            rel = self.coco.loadImgs(self.ids[idx])[0]["file_name"]
+            raw = self._decode_depth(self._depth_path_from_rel(rel)).astype(np.float32)
+            target["depth_mm"] = torch.from_numpy(raw * float(self._bop_depth_scale))
+
         return img, target
 
     def _apply_paligned_transform(self, poses, class_ids):
         """
-        Apply the Paligned transform to objects with class ID 19 or 20 (original category_id).
+        Apply the Paligned transform to objects in paligned_values (original category_id).
 
         Args:
             poses: pose array
@@ -457,11 +462,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         """
         if not os.path.exists(dpath):
             return None
-        depth_pil = Image.open(dpath)
-        if depth_pil.mode in ("I;16", "I;16B", "I;16L", "I"):
-            d_raw = np.array(depth_pil, dtype=np.uint16).astype(np.float32)
-        else:
-            d_raw = np.array(depth_pil.convert("L"), dtype=np.uint8).astype(np.float32)
+        d_raw = self._decode_depth(dpath)
 
         # 1) Convert to actual mm via BOP depth_scale
         d_mm = d_raw * float(self._bop_depth_scale)
@@ -486,13 +487,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         if not os.path.exists(dpath):
             return (None, None) if return_mask else None
 
-        pil = Image.open(dpath)
-        # Preserve 16-bit
-        if pil.mode in ("I;16", "I;16B", "I;16L", "I"):
-            d = np.array(pil, dtype=np.uint16).astype(np.float32)
-        else:
-            # Use L only when 8-bit is all that's available
-            d = np.array(pil.convert("L"), dtype=np.uint8).astype(np.float32)
+        d = self._decode_depth(dpath)
 
         # Unify units: use depth_scale (set in the config)
         if unit == "mm":
@@ -509,10 +504,28 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
             return depth, mask
         return depth
 
+    @staticmethod
+    def _decode_depth(dpath):
+        """Raw depth values as float32: 16-bit PNG (most BOP datasets) or 32-bit float/int TIFF (e.g. ITODD real
+        depth, in mm). NaN/inf become 0 (hole)."""
+        pil = Image.open(dpath)
+        if pil.mode in ("I;16", "I;16B", "I;16L"):
+            d = np.array(pil, dtype=np.uint16).astype(np.float32)
+        elif pil.mode in ("F", "I"):
+            d = np.array(pil).astype(np.float32)
+        else:
+            # Use L only when 8-bit is all that's available
+            d = np.array(pil.convert("L"), dtype=np.uint8).astype(np.float32)
+        d[~np.isfinite(d)] = 0.0
+        return d
+
     def _depth_path_from_rel(self, rel_path, depth_suffix=".png"):
-        # Preserve coco file_name, swap only the extension
-        stem = os.path.splitext(rel_path)[0]
-        return os.path.join(self.depth_root, stem + depth_suffix)
+        # Preserve coco file_name, swap only the extension (.png, or .tif/.tiff when that is what exists)
+        stem = os.path.join(self.depth_root, os.path.splitext(rel_path)[0])
+        for ext in (depth_suffix, ".tif", ".tiff"):
+            if os.path.exists(stem + ext):
+                return stem + ext
+        return stem + depth_suffix
 
     def extra_repr(self) -> str:
         s = f" img_folder: {self.img_folder}\n ann_file: {self.ann_file}\n"
@@ -735,7 +748,7 @@ class ConvertCocoPolysToMask(object):
 
     def _apply_paligned_transform(self, poses, category_ids, paligned_values):
         """
-        Apply the Paligned transform (based on original category_id: 19, 20).
+        Apply the Paligned transform (based on the original category_id).
 
         Args:
             poses: torch.Tensor [N, 12]

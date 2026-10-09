@@ -9,7 +9,7 @@
 1. `pose_engine.evaluate` calls the postprocessor with the per-image intrinsics `cam_K`. The
    postprocessor then returns BOP poses. Translations are in millimeters and rotations are
    egocentric (`rot_repr: allo` predictions are converted). Poses are in the original BOP model
-   frame: `aligned_offsets` are reversed, for example for YCB-V objects 19 and 20.
+   frame: `aligned_offsets` are reversed (YCB-V 19/20, ITODD 2).
 2. `BOPPoseEvaluator` (`bop_evaluator.py`) takes `scene_id` and `original_filename` from each COCO
    image entry. It maps every prediction to `(scene_id, im_id, obj_id, score, R, t)`; labels are
    mapped to BOP object ids through the category file.
@@ -18,6 +18,9 @@
 
 The validation COCO set must contain the BOP19 test images. For YCB-V, that is the 900 images
 listed in `test_targets_bop19.json`.
+
+With test-time depth refinement (`depth_refine` in the postprocessor and `return_depth_mm` in the validation dataset,
+see [src/zoo/race6d/depth_refine.md](../zoo/race6d/depth_refine.md)), the BOP19 scores include the refinement.
 
 ## Configuration
 

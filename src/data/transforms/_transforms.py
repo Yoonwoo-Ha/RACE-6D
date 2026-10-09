@@ -20,13 +20,12 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True  # tolerate truncated cc_textures JPEGs
 import numpy as np
 import cv2
 import os
-import json
 
 from typing import Any, Dict, List, Optional, Tuple, Union
 from .._misc import convert_to_tv_tensor, _boxes_keys
-from .._misc import Image, Video, Mask, BoundingBoxes, Pose, BoundingBoxFormat
+from .._misc import Image, Mask, BoundingBoxes, Pose, BoundingBoxFormat
 from .._misc import SanitizeBoundingBoxes
-from ...core import register, GLOBAL_CONFIG
+from ...core import register
 
 
 RandomPhotometricDistort = register()(T.RandomPhotometricDistort)
@@ -81,10 +80,7 @@ class AugmentationProbabilities:
         self.gaussian_noise = 0.1  # Sometimes(0.1, AdditiveGaussianNoise)
         self.additional_noise = 0.1  # additional noise
         self.grayscale = 0.5  # Sometimes(0.5, Grayscale)
-        self.random_background = 0.4  # separate fixed value (ignores base probability)
         self.coarse_dropout = 0.5  # Sometimes(0.5, CoarseDropout)
-        self.rotate_expand = 0.3  # rotate expand
-        self.object_occlusion = 0.3  # object occlusion
         self.add_value = 0.5  # Sometimes(0.5, Add)
         self.multiply = 0.5  # Sometimes(0.5, Multiply)
 
@@ -106,62 +102,11 @@ class AugmentationManager:
         if hasattr(self.probs, transform_name):
             adjustment = getattr(self.probs, transform_name)
 
-            # Background replacement uses its own fixed value
-            if transform_name == "random_background":
-                return adjustment
-
-            # All others: apply adjustment to base probability
             final_prob = self.base_probability * adjustment
             return max(0.0, min(1.0, final_prob))
 
         # Undefined transforms fall back to base probability
         return self.base_probability
-
-
-class BackgroundColors:
-    STUDIO = {
-        "pure_white": [255, 255, 255],
-        "white_smoke": [245, 245, 245],
-        "light_gray": [211, 211, 211],
-        "neutral_gray": [128, 128, 128],
-        "dark_gray": [64, 64, 64],
-        "pure_black": [0, 0, 0],
-    }
-
-    CHROMA = {
-        "chroma_green": [0, 255, 0],
-        "chroma_blue": [0, 255, 255],
-    }
-
-    INDUSTRIAL = {
-        "industrial_gray": [169, 169, 169],
-        "cool_gray": [144, 144, 192],
-        "warm_gray": [192, 144, 144],
-        "blue_gray": [104, 120, 140],
-    }
-
-    NATURAL = {
-        "sky_blue": [135, 206, 235],
-        "cloud_white": [236, 236, 236],
-        "sand_beige": [210, 180, 140],
-        "earth_brown": [139, 69, 19],
-        "forest_green": [34, 139, 34],
-    }
-
-    INDOOR = {
-        "wall_cream": [255, 253, 208],
-        "floor_brown": [139, 115, 85],
-        "ceiling_white": [248, 248, 255],
-        "room_beige": [245, 245, 220],
-    }
-
-    ITODD = {
-        "itodd_dark_25": [25, 25, 25],
-        "itodd_dark_32": [32, 32, 32],
-        "itodd_dark_39": [39, 39, 39],
-        "itodd_dark_48": [48, 48, 48],
-        "itodd_dark_58": [58, 58, 58],
-    }
 
 
 @register()
@@ -385,12 +330,12 @@ class ColorJitter(T.ColorJitter):
     factor 0 = grayscale, 1 = original, >1 = increased saturation
     """
 
-    def __init__(self, saturation=(0.5, 3.0), hue=0):
+    def __init__(self, saturation=(0.5, 3.0), hue=0, p: float = None):
         # GDRNPP: pillike.EnhanceColor(factor=(0., 20.))
         # factor 0 = grayscale, 1 = original, >1 = increased saturation (hue=0: no hue adjustment in GDRNPP)
         super().__init__(brightness=0, contrast=0, saturation=saturation, hue=hue)
         self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("color_jitter")
+        self.p = p if p is not None else self.aug_manager.get_probability("color_jitter")
 
     def forward(self, *inputs):
         if torch.rand(1) >= self.p:
@@ -427,11 +372,11 @@ class RandomSharpen(T.Transform):
 
     _transformed_types = (PILImage.Image, Image)
 
-    def __init__(self, factor_range: Tuple[float, float] = (0.0, 20.0)) -> None:
+    def __init__(self, factor_range: Tuple[float, float] = (0.0, 20.0), p: float = None) -> None:
         super().__init__()
         self.factor_range = factor_range
         self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("sharpen")
+        self.p = p if p is not None else self.aug_manager.get_probability("sharpen")
 
     def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         if torch.rand(1) >= self.p:
@@ -636,99 +581,6 @@ class RandomCoarseDropout(T.Transform):
 
 
 @register()
-class RandomISPSimulation(T.Transform):
-    """Camera ISP pipeline simulation: Debayering artifacts + Unsharp masking + CLAHE.
-
-    Simulates real camera ISP processing absent from PBR rendering to reduce the sim-to-real gap.
-    Based on the SurfEmb (CVPR 2022) implementation.
-    """
-
-    _transformed_types = (
-        PILImage.Image,
-        Image,
-    )
-
-    def __init__(
-        self,
-        p: float = 0.5,
-        debayer: bool = True,
-        unsharp: bool = True,
-        clahe: bool = True,
-        unsharp_k_limits: Tuple[int, int] = (3, 7),
-        unsharp_strength: Tuple[float, float] = (0.0, 2.0),
-        clahe_clip_limit: float = 2.0,
-        clahe_grid: Tuple[int, int] = (8, 8),
-    ) -> None:
-        super().__init__()
-        self.p = p
-        self.debayer = debayer
-        self.unsharp = unsharp
-        self.clahe = clahe
-        self.unsharp_k_limits = unsharp_k_limits
-        self.unsharp_strength = unsharp_strength
-        self.clahe_clip_limit = clahe_clip_limit
-        self.clahe_grid = clahe_grid
-
-    def _apply_debayer(self, img: np.ndarray) -> np.ndarray:
-        channel_idxs = np.random.permutation(3)
-        channel_idxs_inv = np.empty(3, dtype=int)
-        channel_idxs_inv[channel_idxs] = 0, 1, 2
-
-        bayer = np.zeros(img.shape[:2], dtype=img.dtype)
-        bayer[::2, ::2] = img[::2, ::2, channel_idxs[2]]
-        bayer[1::2, ::2] = img[1::2, ::2, channel_idxs[1]]
-        bayer[::2, 1::2] = img[::2, 1::2, channel_idxs[1]]
-        bayer[1::2, 1::2] = img[1::2, 1::2, channel_idxs[0]]
-
-        method = np.random.choice((cv2.COLOR_BAYER_BG2BGR, cv2.COLOR_BAYER_BG2BGR_EA))
-        return cv2.cvtColor(bayer, method)[..., channel_idxs_inv]
-
-    def _apply_unsharp(self, img: np.ndarray) -> np.ndarray:
-        k = np.random.randint(
-            self.unsharp_k_limits[0] // 2, self.unsharp_k_limits[1] // 2 + 1
-        ) * 2 + 1
-        s = k / 3
-        blur = cv2.GaussianBlur(img, (k, k), s)
-        strength = np.random.uniform(*self.unsharp_strength)
-        return cv2.addWeighted(img, 1 + strength, blur, -strength, 0)
-
-    def _apply_clahe(self, img: np.ndarray) -> np.ndarray:
-        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-        cl = cv2.createCLAHE(
-            clipLimit=self.clahe_clip_limit, tileGridSize=self.clahe_grid
-        )
-        lab[:, :, 0] = cl.apply(lab[:, :, 0])
-        return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        return {
-            "apply_transform": torch.rand(1).item() < self.p,
-            "do_debayer": self.debayer and torch.rand(1).item() < 0.5,
-            "do_unsharp": self.unsharp and torch.rand(1).item() < 0.5,
-            "do_clahe": self.clahe and torch.rand(1).item() < 0.5,
-        }
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params["apply_transform"]:
-            return inpt
-        if not isinstance(inpt, (PILImage.Image, Image)):
-            return inpt
-
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        img = np.array(inpt)
-
-        if params["do_debayer"]:
-            img = self._apply_debayer(img)
-        if params["do_unsharp"]:
-            img = self._apply_unsharp(img)
-        if params["do_clahe"]:
-            img = self._apply_clahe(img)
-
-        return PILImage.fromarray(img)
-
-
-@register()
 class RandomMotionBlur(T.Transform):
     _transformed_types = (
         PILImage.Image,
@@ -914,6 +766,280 @@ class RandomAdditionalNoise(T.Transform):
         if isinstance(inpt, (PILImage.Image, Image)):
             return self._apply_additional_noise(np.array(inpt), params["scale"])
         return inpt
+
+
+@register()
+class RandomBrightness(T.Transform):
+    """GDRNPP-style brightness adjustment.
+
+    GDRNPP: Sometimes(0.5, pillike.EnhanceBrightness(factor=(0.1, 6.)))
+    factor 0 = black, 1 = original, >1 = brighter
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(self, factor_range: Tuple[float, float] = (0.4, 2.5), p: float = None) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else self.aug_manager.get_probability("brightness")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        factor = float(
+            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+        )
+        return {"apply": True, "factor": factor}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            from PIL import ImageEnhance
+
+            enhancer = ImageEnhance.Brightness(inpt)
+            return enhancer.enhance(params["factor"])
+        return inpt
+
+
+@register()
+class RandomContrast(T.Transform):
+    """GDRNPP-style contrast adjustment.
+
+    GDRNPP: Sometimes(0.3, pillike.EnhanceContrast(factor=(0.2, 50.)))
+    factor 0 = gray, 1 = original, >1 = increased contrast
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(self, factor_range: Tuple[float, float] = (0.5, 3.0), p: float = None) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else self.aug_manager.get_probability("contrast")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        factor = float(
+            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+        )
+        return {"apply": True, "factor": factor}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            from PIL import ImageEnhance
+
+            enhancer = ImageEnhance.Contrast(inpt)
+            return enhancer.enhance(params["factor"])
+        return inpt
+
+
+@register()
+class RandomLinearContrast(T.Transform):
+    """GDRNPP-style linear contrast adjustment.
+
+    GDRNPP: Sometimes(0.5, iaa.contrast.LinearContrast((0.5, 2.2), per_channel=0.3))
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(
+        self,
+        factor_range: Tuple[float, float] = (0.5, 2.2),
+        per_channel_prob: float = 0.3,
+        p: float = None,
+    ) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.per_channel_prob = per_channel_prob
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else self.aug_manager.get_probability("linear_contrast")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        per_channel = torch.rand(1) < self.per_channel_prob
+        if per_channel:
+            factors = [
+                float(
+                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+                )
+                for _ in range(3)
+            ]
+        else:
+            f = float(
+                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+            )
+            factors = [f, f, f]
+        return {"apply": True, "factors": factors, "per_channel": per_channel}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            img_array = np.array(inpt, dtype=np.float32)
+            mean = 128.0
+            for c in range(3):
+                img_array[:, :, c] = (img_array[:, :, c] - mean) * params["factors"][
+                    c
+                ] + mean
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            return PILImage.fromarray(img_array)
+        return inpt
+
+
+@register()
+class RandomAdd(T.Transform):
+    """GDRNPP-style additive brightness shift.
+
+    GDRNPP: Sometimes(0.5, Add((-25, 25), per_channel=0.3))
+    Adds the same value to all pixels.
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(
+        self,
+        value_range: Tuple[int, int] = (-25, 25),
+        per_channel_prob: float = 0.3,
+        p: float = None,
+    ) -> None:
+        super().__init__()
+        self.value_range = value_range
+        self.per_channel_prob = per_channel_prob
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else self.aug_manager.get_probability("add_value")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        per_channel = torch.rand(1) < self.per_channel_prob
+        if per_channel:
+            values = [
+                int(
+                    torch.randint(
+                        self.value_range[0], self.value_range[1] + 1, (1,)
+                    ).item()
+                )
+                for _ in range(3)
+            ]
+        else:
+            v = int(
+                torch.randint(self.value_range[0], self.value_range[1] + 1, (1,)).item()
+            )
+            values = [v, v, v]
+        return {"apply": True, "values": values}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            img_array = np.array(inpt, dtype=np.float32)
+            for c in range(3):
+                img_array[:, :, c] += params["values"][c]
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            return PILImage.fromarray(img_array)
+        return inpt
+
+
+@register()
+class RandomMultiply(T.Transform):
+    """GDRNPP-style multiplicative contrast/brightness scaling.
+
+    GDRNPP: Sometimes(0.5, Multiply((0.6, 1.4), per_channel=0.5))
+    Multiplies all pixels by the same factor.
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(
+        self,
+        factor_range: Tuple[float, float] = (0.6, 1.4),
+        per_channel_prob: float = 0.5,
+        p: float = None,
+    ) -> None:
+        super().__init__()
+        self.factor_range = factor_range
+        self.per_channel_prob = per_channel_prob
+        self.aug_manager = AugmentationManager()
+        self.p = p if p is not None else self.aug_manager.get_probability("multiply")
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        per_channel = torch.rand(1) < self.per_channel_prob
+        if per_channel:
+            factors = [
+                float(
+                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+                )
+                for _ in range(3)
+            ]
+        else:
+            f = float(
+                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
+            )
+            factors = [f, f, f]
+        return {"apply": True, "factors": factors}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            img_array = np.array(inpt, dtype=np.float32)
+            for c in range(3):
+                img_array[:, :, c] *= params["factors"][c]
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+            return PILImage.fromarray(img_array)
+        return inpt
+
+
+@register()
+class RandomInvert(T.Transform):
+    """GDRNPP-style inversion: Sometimes(p, Invert(channel_prob, per_channel=True)).
+
+    With probability p, each channel is inverted (255 - v) independently with probability channel_prob.
+    """
+
+    _transformed_types = (PILImage.Image, Image)
+
+    def __init__(self, p: float = 0.3, channel_prob: float = 0.2) -> None:
+        super().__init__()
+        self.p = p
+        self.channel_prob = channel_prob
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        if torch.rand(1) >= self.p:
+            return {"apply": False}
+        return {"apply": True, "channels": (torch.rand(3) < self.channel_prob).tolist()}
+
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        if not params.get("apply", False) or not any(params["channels"]):
+            return inpt
+        if isinstance(inpt, Image):
+            inpt = F.to_pil_image(inpt)
+        if isinstance(inpt, PILImage.Image):
+            arr = np.array(inpt)
+            for c, flip in enumerate(params["channels"]):
+                if flip:
+                    arr[:, :, c] = 255 - arr[:, :, c]
+            return PILImage.fromarray(arr)
+        return inpt
+
 
 # ============================================================================
 # Shared helpers for depth-ordered compositing and geometric pose augmentation.
@@ -1484,6 +1610,13 @@ class PoseAugmentation(nn.Module):
         cam_K   = unchanged (principal-point centered transform)
         px_all  = px_all * scale²
 
+    Depth (RGB-D datasets, scene mode only)
+    ---------------------------------------
+    The depth map gets the same warp (nearest). A roll about the optical axis keeps every point's z, and a zoom
+    by `scale` moves the scene to z / scale (consistent with t_z /= scale), so depth values are divided by
+    `scale`; pixels at the clip_zmax ceiling stay there. Blank areas after the warp become holes (0).
+    Instance mode cannot warp depth consistently and raises if depth is requested.
+
     full_masks REQUIREMENT
     ----------------------
     After geometric warp, amodal bboxes are recomputed as the nonzero tight box
@@ -1554,10 +1687,17 @@ class PoseAugmentation(nn.Module):
 
     @staticmethod
     def _principal_point(target: dict, W: int, H: int) -> Tuple[float, float]:
+        """Principal point in the current image. cam_K stays at the original resolution (target orig_size), so
+        it is rescaled when a Resize ran before this transform."""
         cam_K = target.get("cam_K")
         if cam_K is not None and isinstance(cam_K, torch.Tensor):
             ck = cam_K[0].numpy() if cam_K.dim() > 1 else cam_K.numpy()
-            return float(ck[2]), float(ck[5])
+            sx = sy = 1.0
+            orig_size = target.get("orig_size")
+            if orig_size is not None:
+                ow, oh = (float(v) for v in torch.as_tensor(orig_size).flatten()[:2])
+                sx, sy = W / ow, H / oh
+            return float(ck[2]) * sx, float(ck[5]) * sy
         return W / 2.0, H / 2.0
 
     @staticmethod
@@ -1652,6 +1792,28 @@ class PoseAugmentation(nn.Module):
             return self._apply_instance(image, target, dataset_info)
         return self._apply_scene(image, target, dataset_info)
 
+    @staticmethod
+    def _current_depth(target, dataset_info):
+        """Normalized depth [1, H, W] of this sample (already augmented if present), or None for RGB datasets."""
+        if target.get("_depth_tensor") is not None:
+            return target["_depth_tensor"]
+        if "_depth_path" in target and dataset_info is not None and hasattr(dataset_info, "_load_depth_tensor"):
+            return dataset_info._load_depth_tensor(target["_depth_path"])
+        return None
+
+    def _warp_depth(self, depth_t, M, H, W, scale, dataset_info):
+        d = depth_t.squeeze(0).numpy().astype(np.float32)
+        if d.shape != (H, W):
+            d = cv2.resize(d, (W, H), interpolation=cv2.INTER_NEAREST)
+        wd = cv2.warpAffine(d, M, (W, H), flags=cv2.INTER_NEAREST, borderValue=0.0)
+        if abs(scale - 1.0) > 1e-4:
+            clipped = getattr(dataset_info, "depth_norm", "clip_zmax") == "clip_zmax"
+            ceiling = (wd >= 1.0 - 1e-6) if clipped else np.zeros_like(wd, dtype=bool)
+            wd = np.where(ceiling, wd, wd / scale)
+            if clipped:
+                wd = np.clip(wd, 0.0, 1.0)
+        return torch.from_numpy(wd.astype(np.float32)).unsqueeze(0)
+
     # ---- scene mode ------------------------------------------------------
 
     def _apply_scene(self, image, target, dataset_info):
@@ -1680,6 +1842,11 @@ class PoseAugmentation(nn.Module):
 
         # 2) Mask warp (visib + full)
         new_target = dict(target)
+
+        # 2b) Depth warp (RGB-D): same affine, z / scale, blank -> hole
+        depth_t = self._current_depth(target, dataset_info)
+        if depth_t is not None:
+            new_target["_depth_tensor"] = self._warp_depth(depth_t, M, H, W, scale, dataset_info)
         masks = target["masks"]
         masks_np = masks.numpy() if torch.is_tensor(masks) else np.asarray(masks)
         warped_masks = self._warp_masks_3d(masks_np, M, H, W)
@@ -1745,8 +1912,10 @@ class PoseAugmentation(nn.Module):
     # ---- instance mode ---------------------------------------------------
 
     def _apply_instance(self, image, target, dataset_info):
-        import random
         import copy
+
+        if self._current_depth(target, dataset_info) is not None:
+            raise NotImplementedError("PoseAugmentation instance mode cannot warp depth; use scene mode for RGB-D")
 
         W, H = image.size
         cx, cy = self._principal_point(target, W, H)
@@ -1802,7 +1971,6 @@ class PoseAugmentation(nn.Module):
 
         # Recompute amodal bbox from each kept object's warped full_mask
         kept = [objects[i] for i in keep_indices]
-        N = len(kept)
         full_arr = np.stack([o["full_mask"] for o in kept], axis=0)
         new_boxes = self._amodal_boxes_from_full(full_arr)
         merged["boxes"] = BoundingBoxes(
@@ -2111,6 +2279,44 @@ class DepthAugment(nn.Module):
         noise_prob: float = 0.6,
         noise_base_std: float = 0.001,
         noise_level_max: float = 0.0025,  # iter-random upper bound (GDRNPP style)
+        # (7) Image-border bands (sensor registration border, e.g. Kinect in LM-O). Off by default.
+        # Per side [min, max] base width in px; the width wobbles along the edge (border_jitter px,
+        # smoothed over border_smooth px).
+        border_hole_prob: float = 0.0,
+        border_left: Tuple[int, int] = (0, 0),
+        border_right: Tuple[int, int] = (0, 0),
+        border_top: Tuple[int, int] = (0, 0),
+        border_bottom: Tuple[int, int] = (0, 0),
+        border_jitter: float = 0.0,
+        border_smooth: float = 15.0,
+        # (8) Depth-step holes (sensor shadows / mixed pixels along depth discontinuities). Off by default.
+        # Steps larger than edge_threshold (normalized depth; 0.025 = 50 mm at Z_MAX 2000 mm) are kept in
+        # coherent segments covering edge_keep_frac of the step length; holes grow to a ragged width drawn
+        # log-normally around edge_width_median px (clipped to edge_width_max).
+        edge_hole_prob: float = 0.0,
+        edge_threshold: float = 0.025,
+        edge_keep_frac: Tuple[float, float] = (0.3, 0.7),
+        edge_segment_sigma: float = 10.0,
+        edge_width_median: float = 7.0,
+        edge_width_sigma: float = 0.5,
+        edge_width_max: float = 24.0,
+        edge_ragged: float = 2.0,
+        edge_ragged_sigma: float = 1.5,
+        edge_far_side: bool = False,   # True: holes only on the farther surface of a step (sensor shadow side)
+        # (9) Dark-surface holes (IR-absorbing material): ragged holes inside dark image regions. Off by default.
+        dark_hole_prob: float = 0.0,
+        dark_threshold: int = 30,
+        dark_keep_frac: float = 0.3,
+        # (10) Surface-region holes not tied to depth steps (e.g. specular metal in ITODD). Off by default.
+        # Ragged blobs from a smooth random field (blob scale region_sigma px) covering a hole fraction drawn
+        # from region_frac; object pixels are region_object_bias times as likely, dark pixels region_dark_bias.
+        region_hole_prob: float = 0.0,
+        region_frac: Tuple[float, float] = (0.0, 0.0),
+        region_sigma: float = 12.0,
+        region_object_bias: float = 1.0,
+        region_dark_bias: float = 1.0,
+        region_bright_bias: float = 1.0,   # specular highlights (gray > region_bright_threshold)
+        region_bright_threshold: int = 225,
     ):
         super().__init__()
         # (1)
@@ -2138,6 +2344,35 @@ class DepthAugment(nn.Module):
         self.bg_cluster_size_range = (int(bg_cluster_size_min), int(bg_cluster_size_max))
         self.bg_image_edge_margin = int(bg_image_edge_margin)
         self.bg_far_depth_threshold = float(bg_far_depth_threshold)
+        # (7)
+        self.border_hole_prob = float(border_hole_prob)
+        self.border_widths = {side: (float(w[0]), float(w[1])) for side, w in
+                              (("left", border_left), ("right", border_right), ("top", border_top), ("bottom", border_bottom))}
+        self.border_jitter = float(border_jitter)
+        self.border_smooth = float(border_smooth)
+        # (8)
+        self.edge_hole_prob = float(edge_hole_prob)
+        self.edge_threshold = float(edge_threshold)
+        self.edge_keep_frac = (float(edge_keep_frac[0]), float(edge_keep_frac[1]))
+        self.edge_segment_sigma = float(edge_segment_sigma)
+        self.edge_width_median = float(edge_width_median)
+        self.edge_width_sigma = float(edge_width_sigma)
+        self.edge_width_max = float(edge_width_max)
+        self.edge_ragged = float(edge_ragged)
+        self.edge_ragged_sigma = float(edge_ragged_sigma)
+        self.edge_far_side = bool(edge_far_side)
+        # (9)
+        self.dark_hole_prob = float(dark_hole_prob)
+        self.dark_threshold = int(dark_threshold)
+        self.dark_keep_frac = float(dark_keep_frac)
+        # (10)
+        self.region_hole_prob = float(region_hole_prob)
+        self.region_frac = (float(region_frac[0]), float(region_frac[1]))
+        self.region_sigma = float(region_sigma)
+        self.region_object_bias = float(region_object_bias)
+        self.region_dark_bias = float(region_dark_bias)
+        self.region_bright_bias = float(region_bright_bias)
+        self.region_bright_threshold = int(region_bright_threshold)
         # (6)
         self.noise_prob = float(noise_prob)
         self.noise_base_std = float(noise_base_std)
@@ -2371,6 +2606,117 @@ class DepthAugment(nn.Module):
 
     # ------- main -------
 
+    @staticmethod
+    def _smooth_field(shape, sigma, rng):
+        """Zero-mean, unit-std smooth random field (blurred white noise)."""
+        from scipy.ndimage import gaussian_filter
+        f = gaussian_filter(rng.randn(*shape).astype(np.float32), max(sigma, 1e-3))
+        return (f - f.mean()) / (f.std() + 1e-6)
+
+    def _edge_holes(self, depth, rng):
+        """Ragged holes along depth discontinuities (both sides), in coherent segments."""
+        from scipy.ndimage import distance_transform_edt
+        valid = depth > 0
+        step = np.zeros_like(valid)
+        dx = np.abs(np.diff(depth, axis=1)) > self.edge_threshold
+        dy = np.abs(np.diff(depth, axis=0)) > self.edge_threshold
+        dx &= valid[:, 1:] & valid[:, :-1]
+        dy &= valid[1:, :] & valid[:-1, :]
+        step[:, 1:] |= dx; step[:, :-1] |= dx; step[1:, :] |= dy; step[:-1, :] |= dy
+        if not step.any():
+            return depth
+        H, W = depth.shape
+        keep = float(rng.uniform(*self.edge_keep_frac))
+        seg = self._smooth_field((H, W), self.edge_segment_sigma, rng)
+        seeds = step & (seg > np.quantile(seg, 1.0 - keep))
+        if not seeds.any():
+            return depth
+        width = np.exp(np.log(self.edge_width_median) + self.edge_width_sigma * self._smooth_field((H, W), self.edge_segment_sigma, rng))
+        width = np.clip(width, 1.0, self.edge_width_max)
+        dist = distance_transform_edt(~seeds)
+        reach = 0.5 * width + self.edge_ragged * self._smooth_field((H, W), self.edge_ragged_sigma, rng)
+        holes = dist <= reach
+        if self.edge_far_side:
+            # keep the part lying on the farther surface: depth clearly above the nearest surface around it
+            from scipy.ndimage import minimum_filter
+            k = int(max(3, 2 * np.ceil(min(self.edge_width_max, width.max())) + 1))
+            near = minimum_filter(np.where(valid, depth, np.inf), size=k)
+            holes &= valid & (depth - near > 0.5 * self.edge_threshold)
+            holes |= (dist <= reach) & (dist <= 1.0) & valid & (depth - near > 0.5 * self.edge_threshold)
+        depth = depth.copy()
+        depth[holes] = 0.0
+        return depth
+
+    def _dark_holes(self, depth, image, rng):
+        """Ragged holes inside dark image regions (IR-absorbing surfaces)."""
+        if image is None:
+            return depth
+        g = np.asarray(image.convert("L") if hasattr(image, "convert") else image, dtype=np.float32)
+        if g.ndim == 3:
+            g = g.mean(-1)
+        if g.shape != depth.shape:
+            g = cv2.resize(g, (depth.shape[1], depth.shape[0]), interpolation=cv2.INTER_LINEAR)
+        dark = g < self.dark_threshold
+        if not dark.any():
+            return depth
+        f = self._smooth_field(depth.shape, 4.0, rng)
+        holes = dark & (f > np.quantile(f, 1.0 - self.dark_keep_frac))
+        depth = depth.copy()
+        depth[holes] = 0.0
+        return depth
+
+    def _region_holes(self, depth, masks, image, rng):
+        """Ragged surface blobs (not tied to depth steps), biased toward object / dark pixels."""
+        frac = float(rng.uniform(*self.region_frac))
+        if frac <= 0:
+            return depth
+        H, W = depth.shape
+        score = self._smooth_field((H, W), self.region_sigma, rng)
+        score += 0.35 * self._smooth_field((H, W), max(self.region_sigma / 4.0, 1.0), rng)   # ragged outline
+        if self.region_object_bias != 1.0 and masks:
+            obj = np.any(np.stack([m for m in masks if m.shape == (H, W)]), 0) if any(m.shape == (H, W) for m in masks) else None
+            if obj is not None:
+                score += np.log(self.region_object_bias) * obj
+        if (self.region_dark_bias != 1.0 or self.region_bright_bias != 1.0) and image is not None:
+            g = np.asarray(image.convert("L") if hasattr(image, "convert") else image, dtype=np.float32)
+            if g.ndim == 3:
+                g = g.mean(-1)
+            if g.shape != (H, W):
+                g = cv2.resize(g, (W, H), interpolation=cv2.INTER_LINEAR)
+            score += np.log(self.region_dark_bias) * (g < self.dark_threshold)
+            score += np.log(self.region_bright_bias) * (g > self.region_bright_threshold)
+        valid = depth > 0
+        if not valid.any():
+            return depth
+        thr = np.quantile(score[valid], 1.0 - min(frac, 0.95))
+        depth = depth.copy()
+        depth[(score >= thr) & valid] = 0.0
+        return depth
+
+    def _border_holes(self, depth, rng):
+        from scipy.ndimage import gaussian_filter1d
+        H, W = depth.shape
+        depth = depth.copy()
+        for side, (lo, hi) in self.border_widths.items():
+            if hi <= 0:
+                continue
+            length = H if side in ("left", "right") else W
+            width = rng.uniform(lo, hi) + np.zeros(length, dtype=np.float32)
+            if self.border_jitter > 0:
+                wob = gaussian_filter1d(rng.randn(length), max(self.border_smooth, 1e-3))
+                width = width + wob / (wob.std() + 1e-6) * self.border_jitter
+            width = np.clip(np.round(width), 0, (W if side in ("left", "right") else H) // 4).astype(int)
+            idx = np.arange(W if side in ("left", "right") else H)
+            if side == "left":
+                depth[idx[None, :] < width[:, None]] = 0.0
+            elif side == "right":
+                depth[idx[None, ::-1] < width[:, None]] = 0.0
+            elif side == "top":
+                depth[(idx[:, None] < width[None, :])] = 0.0
+            else:
+                depth[(idx[::-1][:, None] < width[None, :])] = 0.0
+        return depth
+
     def forward(self, *inputs):
         if len(inputs) == 1 and isinstance(inputs[0], tuple):
             inputs = inputs[0]
@@ -2383,7 +2729,9 @@ class DepthAugment(nn.Module):
         if dataset_info is None or not hasattr(dataset_info, "_load_depth_tensor"):
             return inputs if len(inputs) > 1 else inputs[0]
 
-        depth_t = dataset_info._load_depth_tensor(target["_depth_path"])
+        depth_t = target.get("_depth_tensor")
+        if depth_t is None:
+            depth_t = dataset_info._load_depth_tensor(target["_depth_path"])
         if depth_t is None:
             return inputs if len(inputs) > 1 else inputs[0]
 
@@ -2449,6 +2797,22 @@ class DepthAugment(nn.Module):
         if rng.rand() < self.bg_hole_prob:
             depth = self._bg_clustered_holes(depth, masks, rng)
 
+        # (8) Depth-step holes (before noise and border bands)
+        if self.edge_hole_prob > 0 and rng.rand() < self.edge_hole_prob:
+            depth = self._edge_holes(depth, rng)
+
+        # (9) Dark-surface holes
+        if self.dark_hole_prob > 0 and rng.rand() < self.dark_hole_prob:
+            depth = self._dark_holes(depth, image, rng)
+
+        # (10) Surface-region holes
+        if self.region_hole_prob > 0 and rng.rand() < self.region_hole_prob:
+            depth = self._region_holes(depth, masks, image, rng)
+
+        # (7) Image-border bands with a wobbling width
+        if self.border_hole_prob > 0 and rng.rand() < self.border_hole_prob:
+            depth = self._border_holes(depth, rng)
+
         # (6) Gaussian noise on valid pixels
         if rng.rand() < self.noise_prob:
             valid = depth > 0
@@ -2463,34 +2827,6 @@ class DepthAugment(nn.Module):
         if len(inputs) > 2:
             return (image, target, dataset_info)
         return (image, target)
-
-
-# ============================================================================
-# RendererAugmentation - PyTorch3D-based R|t augmentation
-# ============================================================================
-
-# PyRender imports (EGL backend for headless rendering)
-import os
-
-os.environ["PYOPENGL_PLATFORM"] = "egl"  # Must be set before pyrender import
-
-try:
-    import pyrender
-
-    PYRENDER_AVAILABLE = True
-except ImportError:
-    PYRENDER_AVAILABLE = False
-
-try:
-    import trimesh
-
-    TRIMESH_AVAILABLE = True
-except ImportError:
-    TRIMESH_AVAILABLE = False
-
-_OPEN3D_AVAILABLE = (
-    False  # Open3D removed: Embree deadlocks under fork()-based DataLoader
-)
 
 
 # ============================================================================
@@ -3007,322 +3343,11 @@ class CopyPasteSingleClass(nn.Module):
         return (PILImage.fromarray(canvas), merged, dataset)
 
 
-# ============================================================================
-# GDRN/yolox-style imgaug photometric augmentation
-# ============================================================================
-# Mirrors `gdrnpp_bop2022/det/yolox/data/datasets/mosaicdetection.py::_get_color_augmentor`
-# (aug_type="code") so the COLOR_AUG_CODE string from gdrnpp configs can be
-# evaluated as-is. Operates on PIL RGB images and is opt-in via config:
-#     - {type: GDRNPhotoAug, p: 0.8}
-#     - {type: GDRNGrayscale, p: 0.5, alpha_range: [0.0, 1.0]}
-# Other RACE6D photometric ops (RandomGrayscale, ColorJitter, etc.) are
-# untouched, so existing per-dataset configs keep working.
-
-# Structurally identical to gdrnpp/yolox itodd `COLOR_AUG_CODE`, but with the
-# extreme intensities of the 4 enhance ops narrowed (Sharpness 50x, Contrast 50x/0.2x,
-# Brightness 6x/0.1x, Color 20x) → ITODD-tuned default. Prevents some training
-# samples from becoming so saturated that the object is unrecognizable, while
-# keeping wide variation. Invert is left unchanged. Use GDRNPhotoAug(code=...)
-# to specify the original gdrn intensities directly.
-_GDRN_DEFAULT_AUG_CODE = (
-    "Sequential(["
-    "Sometimes(0.5, CoarseDropout(p=0.2, size_percent=0.05)),"
-    "Sometimes(0.4, GaussianBlur((0., 3.))),"
-    "Sometimes(0.3, pillike.EnhanceSharpness(factor=(0., 10.))),"
-    "Sometimes(0.3, pillike.EnhanceContrast(factor=(0.7, 10.))),"
-    "Sometimes(0.5, pillike.EnhanceBrightness(factor=(0.7, 4.0))),"
-    "Sometimes(0.3, pillike.EnhanceColor(factor=(0.3, 5.))),"
-    "Sometimes(0.5, Add((-25, 25), per_channel=0.3)),"
-    "Sometimes(0.3, Invert(0.2, per_channel=True)),"
-    "Sometimes(0.5, Multiply((0.6, 1.4), per_channel=0.5)),"
-    "Sometimes(0.5, Multiply((0.6, 1.4))),"
-    "Sometimes(0.1, AdditiveGaussianNoise(scale=10, per_channel=True)),"
-    "Sometimes(0.5, iaa.contrast.LinearContrast((0.5, 2.2), per_channel=0.3)),"
-    "], random_order=True)"
-)
-
-
-def _build_imgaug_from_code(code: str):
-    """eval() helper that exposes the same imgaug namespace as gdrnpp."""
-    import imgaug.augmenters as iaa  # noqa: F401
-    from imgaug.augmenters import (  # noqa: F401
-        Sequential, SomeOf, OneOf, Sometimes, WithColorspace, WithChannels, Noop,
-        Lambda, AssertLambda, AssertShape, Scale, CropAndPad, Pad, Crop, Fliplr,
-        Flipud, Superpixels, ChangeColorspace, PerspectiveTransform, Grayscale,
-        GaussianBlur, AverageBlur, MedianBlur, Convolve, Sharpen, Emboss, EdgeDetect,
-        DirectedEdgeDetect, Add, AddElementwise, AdditiveGaussianNoise, Multiply,
-        MultiplyElementwise, Dropout, CoarseDropout, Invert, ContrastNormalization,
-        Affine, PiecewiseAffine, ElasticTransformation, pillike, LinearContrast,
-    )
-    try:
-        from imgaug.augmenters import Canny  # noqa: F401
-    except Exception:
-        pass
-    return eval(code)
-
-
-@register()
-class GDRNPhotoAug(nn.Module):
-    """yolox/gdrn `COLOR_AUG_CODE` photometric block, applied via imgaug.
-
-    Mirrors `aug_wrapper` in gdrnpp_bop2022 (yolox detection): the inner
-    Sequential is wrapped by an outer Bernoulli with probability `p`
-    (= COLOR_AUG_PROB, default 0.8). The inner block contains its own
-    Sometimes(...) gates exactly as in the upstream config.
-
-    Args:
-        p: outer apply probability (matches COLOR_AUG_PROB).
-        code: imgaug code string. Default = yolox itodd block (no Grayscale).
-    """
-
-    def __init__(self, p: float = 0.8, code: str = None):
-        super().__init__()
-        self.p = float(p)
-        self.code = code if code is not None else _GDRN_DEFAULT_AUG_CODE
-        self._augmentor = None
-
-    def _ensure_built(self):
-        if self._augmentor is None:
-            self._augmentor = _build_imgaug_from_code(self.code)
-        return self._augmentor
-
-    def forward(self, *inputs):
-        sample = inputs[0] if len(inputs) == 1 else inputs
-        if not isinstance(sample, (list, tuple)) or len(sample) < 1:
-            return sample
-        image = sample[0]
-        if not isinstance(image, PILImage.Image):
-            return sample
-        if torch.rand(1).item() >= self.p:
-            return sample
-        aug = self._ensure_built()
-        img_np = np.array(image)
-        img_aug = aug.augment_image(img_np)
-        new_image = PILImage.fromarray(img_aug)
-        return (new_image,) + tuple(sample[1:])
-
-
-@register()
-class GDRNGrayscale(nn.Module):
-    """imgaug Grayscale matching gdrnpp pose configs:
-        Sometimes(p, Grayscale(alpha=alpha_range))
-    Default p=0.5, alpha_range=(0.0, 1.0) — partial grayscale blending,
-    same as `gdrn/itodd_pbr/...itodd.py` line 31.
-    """
-
-    def __init__(self, p: float = 0.5, alpha_range: Tuple[float, float] = (0.0, 1.0)):
-        super().__init__()
-        self.p = float(p)
-        self.alpha_range = (float(alpha_range[0]), float(alpha_range[1]))
-        self._aug = None
-
-    def _ensure_built(self):
-        if self._aug is None:
-            from imgaug.augmenters import Grayscale
-            self._aug = Grayscale(alpha=self.alpha_range)
-        return self._aug
-
-    def forward(self, *inputs):
-        sample = inputs[0] if len(inputs) == 1 else inputs
-        if not isinstance(sample, (list, tuple)) or len(sample) < 1:
-            return sample
-        image = sample[0]
-        if not isinstance(image, PILImage.Image):
-            return sample
-        if torch.rand(1).item() >= self.p:
-            return sample
-        aug = self._ensure_built()
-        img_np = np.array(image)
-        img_aug = aug.augment_image(img_np)
-        new_image = PILImage.fromarray(img_aug)
-        return (new_image,) + tuple(sample[1:])
-
-
-# =====================================================================
-# Unused augmentations — kept for reference / future experiments only.
-# Not referenced by any YAML config in configs/race6d/. Do not remove
-# without checking configs and external usage.
-# =====================================================================
-
-
-# (unused) Pad image/target to a fixed spatial size (torchvision T.Pad subclass).
-@register()
-class PadToSize(T.Pad):
-    _transformed_types = (
-        PILImage.Image,
-        Image,
-        Video,
-        Mask,
-        BoundingBoxes,
-    )
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        sp = F.get_size(flat_inputs[0])
-        h, w = self.size[1] - sp[0], self.size[0] - sp[1]
-        self.padding = [0, 0, w, h]
-        return dict(padding=self.padding)
-
-    def __init__(self, size, fill=0, padding_mode="constant") -> None:
-        if isinstance(size, int):
-            size = (size, size)
-        self.size = size
-        super().__init__(0, fill, padding_mode)
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        fill = self._fill[type(inpt)]
-        padding = params["padding"]
-        return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
-
-    def __call__(self, *inputs: Any) -> Any:
-        outputs = super().forward(*inputs)
-        if len(outputs) > 1 and isinstance(outputs[1], dict):
-            outputs[1]["padding"] = torch.tensor(self.padding)
-        return outputs
-
-
-
-# (unused) Multiply pixel brightness by a random factor.
-@register()
-class RandomBrightness(T.Transform):
-    """GDRNPP-style brightness adjustment.
-
-    GDRNPP: Sometimes(0.5, pillike.EnhanceBrightness(factor=(0.1, 6.)))
-    factor 0 = black, 1 = original, >1 = brighter
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(self, factor_range: Tuple[float, float] = (0.4, 2.5)) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("brightness")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        factor = float(
-            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-        )
-        return {"apply": True, "factor": factor}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            from PIL import ImageEnhance
-
-            enhancer = ImageEnhance.Brightness(inpt)
-            return enhancer.enhance(params["factor"])
-        return inpt
-
-
-
-# (unused) Scale contrast around per-channel mean by a random factor.
-@register()
-class RandomContrast(T.Transform):
-    """GDRNPP-style contrast adjustment.
-
-    GDRNPP: Sometimes(0.3, pillike.EnhanceContrast(factor=(0.2, 50.)))
-    factor 0 = gray, 1 = original, >1 = increased contrast
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(self, factor_range: Tuple[float, float] = (0.5, 3.0)) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("contrast")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        factor = float(
-            torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-        )
-        return {"apply": True, "factor": factor}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            from PIL import ImageEnhance
-
-            enhancer = ImageEnhance.Contrast(inpt)
-            return enhancer.enhance(params["factor"])
-        return inpt
-
-
-
-# (unused) Linear contrast scaling with per-channel option (imgaug-style).
-@register()
-class RandomLinearContrast(T.Transform):
-    """GDRNPP-style linear contrast adjustment.
-
-    GDRNPP: Sometimes(0.5, iaa.contrast.LinearContrast((0.5, 2.2), per_channel=0.3))
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(
-        self,
-        factor_range: Tuple[float, float] = (0.5, 2.2),
-        per_channel_prob: float = 0.3,
-    ) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.per_channel_prob = per_channel_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("linear_contrast")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        per_channel = torch.rand(1) < self.per_channel_prob
-        if per_channel:
-            factors = [
-                float(
-                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-                )
-                for _ in range(3)
-            ]
-        else:
-            f = float(
-                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-            )
-            factors = [f, f, f]
-        return {"apply": True, "factors": factors, "per_channel": per_channel}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            mean = 128.0
-            for c in range(3):
-                img_array[:, :, c] = (img_array[:, :, c] - mean) * params["factors"][
-                    c
-                ] + mean
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            return PILImage.fromarray(img_array)
-        return inpt
-
-
-
-# (unused) Blend RGB with grayscale by a random alpha.
 @register()
 class RandomGrayscale(T.Transform):
-    """GDRNPP-style grayscale conversion.
+    """Blend the image with its grayscale version with probability p (alpha 0 = original, 1 = gray).
 
-    GDRNPP: Sometimes(0.5, Grayscale(alpha=(0.0, 1.0)))
-    alpha 0 = original, 1 = fully grayscale, intermediate = blended
+    Used for ITODD, whose test images are grayscale (GDRNPP: Sometimes(0.5, Grayscale(alpha=(0.0, 1.0)))).
     """
 
     _transformed_types = (PILImage.Image, Image)
@@ -3355,116 +3380,3 @@ class RandomGrayscale(T.Transform):
             blended = cv2.addWeighted(arr, 1.0 - alpha, gray_3ch, alpha, 0)
             return PILImage.fromarray(blended)
         return inpt
-
-
-
-# (unused) Add a random offset to pixel values (additive jitter).
-@register()
-class RandomAdd(T.Transform):
-    """GDRNPP-style additive brightness shift.
-
-    GDRNPP: Sometimes(0.5, Add((-25, 25), per_channel=0.3))
-    Adds the same value to all pixels.
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(
-        self, value_range: Tuple[int, int] = (-25, 25), per_channel_prob: float = 0.3
-    ) -> None:
-        super().__init__()
-        self.value_range = value_range
-        self.per_channel_prob = per_channel_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("add_value")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        per_channel = torch.rand(1) < self.per_channel_prob
-        if per_channel:
-            values = [
-                int(
-                    torch.randint(
-                        self.value_range[0], self.value_range[1] + 1, (1,)
-                    ).item()
-                )
-                for _ in range(3)
-            ]
-        else:
-            v = int(
-                torch.randint(self.value_range[0], self.value_range[1] + 1, (1,)).item()
-            )
-            values = [v, v, v]
-        return {"apply": True, "values": values}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            for c in range(3):
-                img_array[:, :, c] += params["values"][c]
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            return PILImage.fromarray(img_array)
-        return inpt
-
-
-
-# (unused) Multiply pixel values by a random factor (multiplicative jitter).
-@register()
-class RandomMultiply(T.Transform):
-    """GDRNPP-style multiplicative contrast/brightness scaling.
-
-    GDRNPP: Sometimes(0.5, Multiply((0.6, 1.4), per_channel=0.5))
-    Multiplies all pixels by the same factor.
-    """
-
-    _transformed_types = (PILImage.Image, Image)
-
-    def __init__(
-        self,
-        factor_range: Tuple[float, float] = (0.6, 1.4),
-        per_channel_prob: float = 0.5,
-    ) -> None:
-        super().__init__()
-        self.factor_range = factor_range
-        self.per_channel_prob = per_channel_prob
-        self.aug_manager = AugmentationManager()
-        self.p = self.aug_manager.get_probability("multiply")
-
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        if torch.rand(1) >= self.p:
-            return {"apply": False}
-        per_channel = torch.rand(1) < self.per_channel_prob
-        if per_channel:
-            factors = [
-                float(
-                    torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-                )
-                for _ in range(3)
-            ]
-        else:
-            f = float(
-                torch.empty(1).uniform_(self.factor_range[0], self.factor_range[1])
-            )
-            factors = [f, f, f]
-        return {"apply": True, "factors": factors}
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        if not params.get("apply", False):
-            return inpt
-        if isinstance(inpt, Image):
-            inpt = F.to_pil_image(inpt)
-        if isinstance(inpt, PILImage.Image):
-            img_array = np.array(inpt, dtype=np.float32)
-            for c in range(3):
-                img_array[:, :, c] *= params["factors"][c]
-            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-            return PILImage.fromarray(img_array)
-        return inpt
-
-
-

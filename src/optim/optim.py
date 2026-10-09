@@ -23,17 +23,14 @@ OneCycleLR = register()(lr_scheduler.OneCycleLR)
 LambdaLR = register()(lr_scheduler.LambdaLR)
 
 
-def _flat_cosine_schedule(total_iter, warmup_iter, flat_iter, no_aug_iter, current_iter, init_lr, min_lr):
-    """4-phase LR schedule (iteration-based).
+def _flat_cosine_schedule(total_iter, warmup_iter, flat_iter, current_iter, init_lr, min_lr):
+    """LR schedule (iteration-based).
     Phase 1: Warmup (quadratic, 0 → init_lr)
     Phase 2: Flat (maintain init_lr)
-    Phase 3: Cosine decay (init_lr → min_lr, fully complete)
-    Phase 4: No-aug (fixed at min_lr)
-
-    Total training = T_max epochs; no_aug is the final segment within T_max.
-    Cosine decays fully from end of flat phase → (T_max - no_aug) interval down to min_lr.
+    Phase 3: Cosine decay from the end of the flat phase to min_lr at T_max
+    Phase 4: min_lr for any epoch after T_max (training longer than T_max holds the final LR)
     """
-    cosine_end = total_iter - no_aug_iter
+    cosine_end = total_iter
     if current_iter <= warmup_iter:
         return init_lr * (current_iter / max(float(warmup_iter), 1)) ** 2
     elif warmup_iter < current_iter <= flat_iter:
@@ -57,22 +54,23 @@ class FlatCosineAnnealingLR:
     Args:
         optimizer: optimizer instance
         lr_gamma: min_lr = base_lr * lr_gamma (default: 0.5)
-        T_max: total number of training epochs
+        T_max: epoch at which the cosine decay reaches min_lr; epochs beyond it stay at min_lr
         warmup_iter: number of warmup iterations (default: 2000)
         flat_epochs: number of flat phase epochs
-        no_aug_epochs: number of no-aug phase epochs
         group_flat_epochs: dict {group_idx: flat_epochs} — per-group flat phase customization
             e.g.: {0: 0, 1: 0} → groups 0 and 1 skip flat phase and go straight to cosine decay
     """
     def __init__(self, optimizer, lr_gamma=0.5, T_max=40,
-                 warmup_iter=2000, flat_epochs=5, no_aug_epochs=8,
+                 warmup_iter=2000, flat_epochs=5,
                  group_flat_epochs=None, **kwargs):
+        if kwargs.get('no_aug_epochs'):
+            raise ValueError('FlatCosineAnnealingLR: no_aug_epochs was removed; use T_max - no_aug_epochs as T_max '
+                             '(the cosine then ends at the same epoch and later epochs stay at min_lr)')
         self.base_lrs = [group['lr'] for group in optimizer.param_groups]
         self.min_lrs = [lr * lr_gamma for lr in self.base_lrs]
         self.T_max = T_max
         self.warmup_iter = warmup_iter
         self.flat_epochs = flat_epochs
-        self.no_aug_epochs = no_aug_epochs
         self.group_flat_epochs = group_flat_epochs or {}
         self.lr_funcs = None  # per-group schedule functions
         self._iter_based = True
@@ -81,14 +79,13 @@ class FlatCosineAnnealingLR:
         """Called after dataloader is created. Computes the actual schedule from iter_per_epoch."""
         from functools import partial
         total_iter = int(iter_per_epoch * self.T_max)
-        no_aug_iter = int(iter_per_epoch * self.no_aug_epochs)
 
         self.lr_funcs = []
         for i in range(len(self.base_lrs)):
             group_flat = self.group_flat_epochs.get(i, self.flat_epochs)
             flat_iter = int(iter_per_epoch * group_flat)
             self.lr_funcs.append(partial(
-                _flat_cosine_schedule, total_iter, self.warmup_iter, flat_iter, no_aug_iter))
+                _flat_cosine_schedule, total_iter, self.warmup_iter, flat_iter))
 
     def step(self, current_iter, optimizer):
         """Called every iteration. Updates the optimizer LR."""

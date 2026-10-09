@@ -46,6 +46,7 @@ RACE6DTransformer_DQE:
   eval_idx: -1
   activation: quick_gelu
   mlp_act: quick_gelu
+  symmetry_override: {25: none, 26: none}
 
 RACE6DPostProcessor:
   num_top_queries: 50
@@ -75,15 +76,14 @@ optimizer:
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 40
+epoches: 60
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 40
+  T_max: 54
   lr_gamma: 0.5
   warmup_iter: 100
-  flat_epochs: 5
-  no_aug_epochs: 15
+  flat_epochs: 30
 
 train_dataloader:
   dataset:
@@ -92,21 +92,19 @@ train_dataloader:
     transforms:
       ops:
         - {type: Resize, size: [480, 640]}
+        - {type: PoseAugmentation, per_instance: False, rotation_range: 20.0, zoom_range: [1.0, 1.0], p: 0.5, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
         - {type: RandomCoarseDropout}
-        - {type: ColorJitter} #ok
-        - {type: RandomHSVAdjust} #ok
-        - {type: RandomSharpen} #ok
-        - {type: RandomMotionBlur} #ok
-        - {type: RandomGaussianBlur} #ok
-        - {type: RandomGaussianNoise} #ok
-        - {type: RandomAdditionalNoise} #ok
+        - {type: ColorJitter}
+        - {type: RandomHSVAdjust}
+        - {type: RandomSharpen}
+        - {type: RandomMotionBlur}
+        - {type: RandomGaussianBlur}
+        - {type: RandomGaussianNoise}
+        - {type: RandomAdditionalNoise}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
-      policy:
-        name: stop_epoch
-        epoch: [0, 30]
-        ops: [RandomCoarseDropout, ColorJitter, RandomHSVAdjust, RandomSharpen, RandomMotionBlur, RandomGaussianBlur, RandomGaussianNoise, RandomAdditionalNoise]
+      policy: {name: default}
     return_masks: True
     return_full_masks: False
     remap_mscoco_category: True

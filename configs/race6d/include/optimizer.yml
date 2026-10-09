@@ -27,8 +27,7 @@ optimizer:
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 50
+  T_max: 40
   lr_gamma: 0.5
   warmup_iter: 1000
   flat_epochs: 5
-  no_aug_epochs: 10

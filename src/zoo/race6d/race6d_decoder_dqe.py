@@ -453,6 +453,7 @@ class RACE6DTransformer_DQE(nn.Module):
                  coco_path=None,
                  category_file=None,
                  max_sym_disc_step=0.01,
+                 symmetry_override=None,
                  num_denoising=100,
                  label_noise_ratio=0.5,
                  box_noise_scale=1.0,
@@ -563,7 +564,7 @@ class RACE6DTransformer_DQE(nn.Module):
         # pose info (stored as buffer → included in checkpoint)
         self._has_pose_info = coco_path is not None
         if self._has_pose_info:
-            self._load_pose_info(coco_path, category_file, max_sym_disc_step)
+            self._load_pose_info(coco_path, category_file, max_sym_disc_step, symmetry_override)
 
         self._reset_parameters()
 
@@ -607,8 +608,13 @@ class RACE6DTransformer_DQE(nn.Module):
 
     # ==================== Pose Info Loading ====================
 
-    def _load_pose_info(self, coco_path, category_file, max_sym_disc_step=0.01):
-        """Load pose-related data and store via register_buffer."""
+    def _load_pose_info(self, coco_path, category_file, max_sym_disc_step=0.01, symmetry_override=None):
+        """Load pose-related data and store via register_buffer.
+
+        symmetry_override: {category_id: 'none' | {symmetries_discrete / symmetries_continuous}} replaces the
+        models_info symmetries of these objects in training (loss, matching, denoising). 'none' trains the object
+        as asymmetric. BOP evaluation keeps the official symmetries.
+        """
         import yaml
         import open3d as o3d
 
@@ -662,6 +668,8 @@ class RACE6DTransformer_DQE(nn.Module):
                 continue
 
             obj_info = original_models_info[category_key]
+            if symmetry_override and category_id in symmetry_override:
+                obj_info = self._override_symmetry(obj_info, symmetry_override[category_id])
             self.models_info[label_id] = obj_info
 
             # Diameter
@@ -716,9 +724,10 @@ class RACE6DTransformer_DQE(nn.Module):
     def _load_model_points(o3d, file_path, num_samples=1500):
         """Sample points uniformly on the PLY surface, then FPS for coverage.
 
-        Replaces the previous read_point_cloud (vertex-only) path which
-        repeat-padded sparse meshes — see race6d_decoder_dqe_nokpt.py for
-        the full rationale.
+        Reading raw vertices (o3d.io.read_point_cloud) skipped FPS for low-poly meshes
+        (e.g. ITODD obj_25 = 466, obj_27 = 920 vertices) and repeat-padded them, concentrating the
+        supervision on sparse corner points. read_triangle_mesh + sample_points_uniformly gives a
+        face-aware uniform distribution; FPS on an oversampled seed keeps the spatial coverage.
         """
         mesh = o3d.io.read_triangle_mesh(file_path)
         if mesh.has_triangles():
@@ -753,6 +762,14 @@ class RACE6DTransformer_DQE(nn.Module):
             class_id = int(class_id_str)
             keypoints_3d[class_id - 1] = torch.tensor(keypoints, dtype=torch.float32)
         return keypoints_3d, edges_mask_data
+
+    @staticmethod
+    def _override_symmetry(obj_info, override):
+        keys = ('symmetries_discrete', 'symmetries_continuous')
+        obj_info = {k: v for k, v in obj_info.items() if k not in keys}
+        if override not in (None, 'none'):
+            obj_info.update({k: override[k] for k in keys if k in override})
+        return obj_info
 
     @staticmethod
     def _build_symmetry_matrices(obj_info, max_sym_disc_step=0.01):

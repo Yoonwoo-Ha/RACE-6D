@@ -14,6 +14,7 @@ import yaml
 
 from ...core import register
 from .utils import allocentric_to_egocentric, check_rot_repr
+from .depth_refine import refine_translations_with_depth, sample_model_points
 
 
 __all__ = ['RACE6DPostProcessor']
@@ -44,6 +45,7 @@ class RACE6DPostProcessor(nn.Module):
         category_file=None,
         aligned_offsets=None,
         rot_repr='ego',
+        depth_refine=None,
     ) -> None:
         """
         aligned_offsets: {category_id: [x, y, z] mm} for objects trained in an aligned model frame
@@ -52,6 +54,11 @@ class RACE6DPostProcessor(nn.Module):
         rot_repr: 'ego' or 'allo' (shared config key). For 'allo', the predicted rotation is converted to
             egocentric with the predicted translation direction when cam_K is passed to forward();
             without cam_K the raw allocentric rotation is returned.
+        depth_refine: optional test-time refinement of the translation with a measured depth map (see
+            depth_refine.refine_translations_with_depth), used when forward() gets both cam_K and depth:
+            {models_path: dir with obj_XXXXXX.ply in the original BOP frame (e.g. models_eval),
+             score_thr: 0.25, num_points: 3000, cell: 3, max_diff_mm: 50, iters: 2,
+             device: auto (where the network outputs are) | cpu | cuda, compile: False (GPU only)}.
         """
         super().__init__()
         self.use_focal_loss = use_focal_loss
@@ -88,6 +95,18 @@ class RACE6DPostProcessor(nn.Module):
                     offsets[self.mscoco_category2label[int(cat)]] = torch.tensor(p, dtype=torch.float32)
             self.register_buffer('_aligned_offsets', offsets, persistent=False)
 
+        # Model points for the depth refinement (non-persistent: checkpoints are unaffected)
+        self.depth_refine = dict(depth_refine) if depth_refine else None
+        if self.depth_refine:
+            models_path = os.path.expanduser(self.depth_refine.pop('models_path'))
+            num_points = int(self.depth_refine.pop('num_points', 3000))
+            self.refine_score_thr = float(self.depth_refine.pop('score_thr', 0.25))
+            points = torch.zeros(len(self.mscoco_label2category), num_points, 3)
+            for label, cat in self.mscoco_label2category.items():
+                points[label] = torch.from_numpy(
+                    sample_model_points(os.path.join(models_path, f'obj_{int(cat):06d}.ply'), num_points, seed=int(cat)))
+            self.register_buffer('_refine_points', points, persistent=False)
+
     def extra_repr(self) -> str:
         return f'use_focal_loss={self.use_focal_loss}, num_classes={self.num_classes}, num_top_queries={self.num_top_queries}'
 
@@ -106,10 +125,12 @@ class RACE6DPostProcessor(nn.Module):
         ty = ((ry * h + cy - py) * tz) / fy
         return torch.stack([tx, ty, tz], dim=-1)
 
-    def forward(self, outputs, orig_target_sizes: torch.Tensor, cam_K=None):
+    def forward(self, outputs, orig_target_sizes: torch.Tensor, cam_K=None, depth=None):
         """cam_K (optional, [3, 3] or [B, 3, 3]): if given, translations are returned in mm in the original
         model frame (aligned_offsets reversed) and rotations are egocentric; otherwise the raw bbox-relative
-        (rx, ry, log_tz) and the rotation as regressed (allocentric for rot_repr='allo') are returned."""
+        (rx, ry, log_tz) and the rotation as regressed (allocentric for rot_repr='allo') are returned.
+        depth (optional, [B, H, W] mm at the original image resolution, 0 = no measurement): with cam_K and a
+        configured depth_refine, translations of predictions scoring >= score_thr are refined with it."""
         logits = outputs['pred_logits']
         boxes = outputs['pred_boxes']  # [B, N, 4] cxcywh normalized
 
@@ -171,6 +192,15 @@ class RACE6DPostProcessor(nn.Module):
                     # labels are still label indices here (remap happens below)
                     p = self._aligned_offsets[labels].to(translations.dtype)          # [B, K, 3]
                     translations = translations - (rot_matrices.to(translations.dtype) @ p.unsqueeze(-1)).squeeze(-1)
+                if self.depth_refine is not None and depth is not None:
+                    B, Q = translations.shape[:2]
+                    K = cam_K.reshape(-1, 3, 3).expand(B, 3, 3)
+                    translations = refine_translations_with_depth(
+                        rot_matrices.reshape(-1, 3, 3), translations.reshape(-1, 3), labels.reshape(-1),
+                        K[:, None].expand(B, Q, 3, 3).reshape(-1, 3, 3), depth, self._refine_points,
+                        torch.arange(B, device=labels.device).repeat_interleave(Q),
+                        valid=(topk_scores >= self.refine_score_thr).reshape(-1), **self.depth_refine,
+                    ).reshape(B, Q, 3)
 
         # Gather keypoints if available
         has_keypoints = 'pred_keypoints' in outputs

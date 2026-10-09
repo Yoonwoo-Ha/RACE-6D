@@ -198,7 +198,9 @@ def evaluate(
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         # With cam_K the postprocessor returns BOP poses (mm, egocentric, original model frame); boxes are unchanged.
-        results = postprocessor(outputs, orig_target_sizes, cam_K=cam_K)
+        # With depth (dataset return_depth_mm) and a configured depth_refine, translations are refined with it.
+        depth = torch.stack([t["depth_mm"] for t in targets]) if "depth_mm" in targets[0] else None
+        results = postprocessor(outputs, orig_target_sizes, cam_K=cam_K, depth=depth)
 
         res = {target["image_id"].item(): output for target, output in zip(targets, results)}
         if coco_evaluator is not None:
