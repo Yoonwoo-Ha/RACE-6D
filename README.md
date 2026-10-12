@@ -82,7 +82,7 @@ needs only the checkpoint, the config and its category file.
 #### HB and ITODD evaluation
 
 The BOP test ground truth of HB and ITODD is not public, so their configs evaluate on the official validation split,
-exported by the toolkit as `hb2coco_test_eval_amodal` / `itodd2coco_test_eval_amodal` (see its recipe). Test results
+exported by the toolkit with `--split val` as `hb2coco_test_eval_amodal` / `itodd2coco_test_eval_amodal`. Test results
 are scored by the BOP server.
 
 #### Objects with an off-origin symmetry axis
