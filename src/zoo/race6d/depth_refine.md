@@ -26,7 +26,7 @@ The code is in `depth_refine.py` (`refine_translations_with_depth`). It is one P
 ```yaml
 RACE6DPostProcessor:
   depth_refine:
-    models_path: ~/Downloads/bop_eval/lmo/models_eval   # obj_XXXXXX.ply in the original BOP model frame
+    models_path: ~/Downloads/lmo/models_eval   # obj_XXXXXX.ply in the original BOP model frame
     score_thr: 0.25
     device: auto
     compile: True

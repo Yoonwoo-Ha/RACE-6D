@@ -9,7 +9,7 @@
 1. `pose_engine.evaluate` calls the postprocessor with the per-image intrinsics `cam_K`. The
    postprocessor then returns BOP poses. Translations are in millimeters and rotations are
    egocentric (`rot_repr: allo` predictions are converted). Poses are in the original BOP model
-   frame: `aligned_offsets` are reversed (YCB-V 19/20, ITODD 2).
+   frame: the `P` saved with the evaluated weights is reversed (YCB-V 19/20, ITODD 2).
 2. `BOPPoseEvaluator` (`bop_evaluator.py`) takes `scene_id` and `original_filename` from each COCO
    image entry. It maps every prediction to `(scene_id, im_id, obj_id, score, R, t)`; labels are
    mapped to BOP object ids through the category file.
@@ -17,7 +17,8 @@
    It reads `scores_bop19.json` and adds the scores to the epoch statistics.
 
 The validation COCO set must contain the BOP19 test images. For YCB-V, that is the 900 images
-listed in `test_targets_bop19.json`.
+listed in `test_targets_bop19.json`. HB and ITODD have no public test GT: their validation splits
+need `split: val` and a target list for those images (`targets_filename`).
 
 With test-time depth refinement (`depth_refine` in the postprocessor and `return_depth_mm` in the validation dataset,
 see [src/zoo/race6d/depth_refine.md](../zoo/race6d/depth_refine.md)), the BOP19 scores include the refinement.
@@ -29,8 +30,8 @@ bop_eval:
   enabled: true
   dataset: ycbv                            # BOP dataset name
   split: test
-  dataset_root: ~/Downloads/bop_eval/ycbv  # original BOP dataset folder
-  toolkit_path: ~/Downloads/bop_toolkit    # bop_toolkit clone
+  dataset_root: ~/Downloads/ycbv           # original BOP dataset folder
+  toolkit_path: ~/Downloads/bop_toolkit_race6d  # bop_toolkit clone
   renderer_path: ~/Downloads/bop_renderer/build  # built bop_renderer (renderer_type: cpp)
   renderer_type: cpp                       # cpp | vispy | python
   targets_filename: test_targets_bop19.json
@@ -45,10 +46,8 @@ Relative paths are resolved from the repository root, and `~` is expanded.
 
 - **`dataset_root`:** an original BOP dataset folder. It must contain the test split, `models_eval/`
   and the targets file. The toolkit uses its parent folder as `BOP_PATH`, so the folder name
-  must equal `dataset`.
-  - Use the original BOP meshes here, not meshes shifted for training. The predictions are already
-    mapped back to the original model frame.
-  - For YCB-V, keep a separate copy if your training data uses the shifted meshes of objects 19 and 20.
+  must equal `dataset`. The training dataset folder works: its meshes and GT stay in the original
+  BOP frame, and the predictions are mapped back to it.
 - **`toolkit_path`:** a clone of the BOP toolkit, either the official one or the
   [RACE6D fork](https://github.com/Yoonwoo-Ha/bop_toolkit). It is added to `PYTHONPATH`, and the
   evaluation script runs from this folder.

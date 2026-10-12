@@ -2236,8 +2236,7 @@ class PasteSurfaces(nn.Module):
     """Large upright surfaces for RGB-D training (monitor / wall-like panels and boxes).
 
     The LM-O RGB-D model fails on the real desk because of large tall surfaces in the scene depth (monitor, laptop,
-    walls, big clutter masses), which LM PBR scenes do not contain (diagnostics lmo_rgbd_scale_abcd_claude_20261009,
-    twin A/B/C). This op fits the floor plane of the sample's depth (RANSAC outside the annotated objects), stands
+    walls, big clutter masses), which LM PBR scenes do not contain. This op fits the floor plane of the sample's depth (RANSAC outside the annotated objects), stands
     n_range panels (thin, wide, tall, roughly facing the camera) or boxes on it, `p_behind` of them farther than the
     targets, and ray-casts them into the depth (z-buffer) and the RGB (texture from `background_dir`, Lambert shading).
     A placement must cover >= min_area of the image and hide <= max_cover of every target's visible mask (checked on

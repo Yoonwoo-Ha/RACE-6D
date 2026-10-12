@@ -74,7 +74,9 @@ All training data is prepared from the original BOP archives with the
 (`scripts/prepare_race6d_models.py --install_to`). The toolkit expects raw datasets under `~/Downloads/<dataset>/` by
 default; the guide explains how to use a different location.
 
-Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_rgb.yml` to match your local layout. Each dataset directory must contain the `models/` folder (3D CAD models are loaded by the criterion at initialization).
+Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_*.yml` to match your local layout. The
+dataset folder (`coco_path`) must contain the original `models/` (with `models_info.json`),
+`cached_keypoints_3d_edge.json` and `p_values.json`; the model reads them when it is built.
 
 #### HB and ITODD evaluation
 
@@ -198,9 +200,52 @@ python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml \
     --test-only -r path/to/checkpoint.pth
 ```
 
-With `--test-only`, the evaluator reports COCO box metrics. For BOP-format results, call the postprocessor with the
-image intrinsics, `postprocessor(outputs, orig_target_sizes, cam_K=K)`: it then returns egocentric rotations and
-translations in millimeters in the original BOP model frame.
+With `--test-only`, the evaluator reports COCO box metrics.
+
+#### BOP results (CSV)
+
+Called with the image intrinsics, the postprocessor returns BOP poses: egocentric rotations and translations in
+millimeters, in the original BOP model frame. A minimal single-image example:
+
+```python
+import json
+import torch
+import torchvision.transforms as T
+from PIL import Image
+from src.core import YAMLConfig
+
+cfg = YAMLConfig('configs/race6d/r50vd/race6d_r50vd_ycbv_rgb.yml')
+cfg.yaml_cfg['RACE6DPostProcessor']['remap_mscoco_category'] = True   # labels -> BOP object ids
+state = torch.load('checkpoint.pth', map_location='cpu', weights_only=False)
+cfg.model.load_state_dict(state['ema']['module'] if 'ema' in state else state['model'])
+model = cfg.model.deploy().cuda()
+post = cfg.postprocessor.deploy().cuda()
+post.use_model_offsets(model)   # P saved with the weights (YCB-V 19/20, ITODD 2)
+
+scene, im_id = 'ycbv/test/000048', 1
+K = torch.tensor(json.load(open(f'{scene}/scene_camera.json'))[str(im_id)]['cam_K']).float().reshape(1, 3, 3).cuda()
+img = Image.open(f'{scene}/rgb/{im_id:06d}.png').convert('RGB')
+x = T.Compose([T.Resize((480, 640)), T.ToTensor()])(img)[None].cuda()
+with torch.no_grad():
+    obj_ids, boxes, scores, R, t = post(model(x), torch.tensor([[img.width, img.height]]).cuda(), cam_K=K)
+# one CSV row per query: scene_id, im_id, obj_id, score, R (row-major), t (mm), time
+```
+
+- Use each image's own `cam_K` from `scene_camera.json`; intrinsics differ between images (e.g. YCB-V real, T-LESS).
+- Predict the images listed in `test_targets_bop19.json` and keep all queries; the BOP toolkit selects them by score.
+- `post.use_model_offsets(model)` applies the `P` saved with the weights. Without it, or for checkpoints without a
+  saved `P`, the postprocessor uses the config value or `{coco_path}/p_values.json`. To convert poses predicted in
+  the shifted model frame yourself:
+
+  ```python
+  import json, numpy as np
+  P = {int(k): np.asarray(v) for k, v in json.load(open('ycbv/p_values.json')).items()}
+  t_bop = t - R @ P[obj_id]   # R, t: pose of the shifted model; same R
+  ```
+
+- The `time` column is the run time per image in seconds (identical for all rows of an image), or `-1`.
+- RGB-D configs also take the depth image (see the validation transforms of the config).
+- HB and ITODD test results are scored by the BOP server.
 
 To also report BOP19 AR (VSD / MSSD / MSPD) after every epoch and with `--test-only`, add a `bop_eval` block to the
 config. It runs the official BOP toolkit and keeps the top-5 checkpoints by AR. See
@@ -215,7 +260,7 @@ off by default); see [src/zoo/race6d/depth_refine.md](src/zoo/race6d/depth_refin
 |-----|-------|--------|
 | `rot_repr` | top level (shared by decoder, criterion, matcher and postprocessor) | `ego` (default, released checkpoints): the network regresses the camera-frame rotation. `allo`: it regresses the allocentric rotation, converted to egocentric with the translation direction (GT in training, prediction at inference). |
 | `depth_norm` | RGB-D dataset | `clip_zmax` (default) or `meters` |
-| `aligned_offsets` | top level (shared by decoder, dataset and postprocessor) | P `{category_id: [x, y, z]}` in mm of the objects trained in a shifted model frame (YCB-V 19/20, ITODD 2): model points and keypoints `-P`, GT poses `t + R @ P`, BOP output `t - R @ P`. Unset (default): read from `{coco_path}/p_values.json` (bop_toolkit_race6d `prepare_race6d_models.py --install_to`); `none`: no shift. P is saved in the checkpoint with the 3D keypoints, and evaluation/`bop.py` use the saved value; checkpoints without it use this setting |
+| `aligned_offsets` | top level (shared by decoder, dataset and postprocessor) | P `{category_id: [x, y, z]}` in mm of the objects trained in a shifted model frame (YCB-V 19/20, ITODD 2): model points and keypoints `-P`, GT poses `t + R @ P`, BOP output `t - R @ P`. Unset (default): read from `{coco_path}/p_values.json` (bop_toolkit_race6d `prepare_race6d_models.py --install_to`); `none`: no shift. P is saved in the checkpoint with the 3D keypoints, and evaluation uses the saved value (`postprocessor.use_model_offsets`); checkpoints without it use this setting |
 | `iou_threshold` | `HungarianMatcher` | drops matched pairs whose box IoU is below it (`0`, the default, keeps all) |
 | `eval_idx` | `RACE6DTransformer_DQE` | decoder layer used at inference (`-1` = last), also with `vis_enc: True` |
 | `depth_refine` | `RACE6DPostProcessor` | test-time depth refinement of the translation, see [depth_refine.md](src/zoo/race6d/depth_refine.md) (off by default) |
@@ -333,7 +378,7 @@ model.deploy()
 
 | Dataset | Modality | Config |
 |---------|----------|--------|
-| LM-O    | RGB      | `configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml`   |
+| LM-O    | RGB / RGB-D | `configs/race6d/r50vd/race6d_r50vd_lmo_rgb.yml`, `..._rgbd.yml` |
 | YCB-V   | RGB / RGB-D | `configs/race6d/r50vd/race6d_r50vd_ycbv_rgb.yml`, `..._rgbd.yml`, `..._rgbd_ft.yml` |
 | T-LESS  | RGB / RGB-D | `configs/race6d/r50vd/race6d_r50vd_tless_rgb.yml`, `..._rgbd.yml` |
 | TUD-L   | RGB      | `configs/race6d/r50vd/race6d_r50vd_tudl_rgb.yml`  |

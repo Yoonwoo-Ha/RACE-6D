@@ -77,6 +77,7 @@ These presets match the hole statistics only; their effect on training is not va
 |-----------|--------------|
 | **BackgroundReplacement** | Replaces the image background with a random image from `background_dir` (e.g. VOC2012 `JPEGImages`). |
 | **CopyPasteSingleClass** | Cross-image same-class copy-paste with a VOC background. Adds 2–10 extra instances per image, filtered by visibility and bbox-IoU, with optional edge blending. |
+| **PasteSurfaces** | RGB-D: stands large panels and boxes (monitor / wall-like surfaces) on the floor plane fitted to the depth, ray-cast into depth and RGB (texture from `background_dir`); occluded masks and visibility are updated. Place it first in `ops` (LM-O RGB-D). |
 
 ## Geometric pose augmentation
 
@@ -95,7 +96,7 @@ These presets match the hole statistics only; their effect on training is not va
 | Transform | What it does |
 |-----------|--------------|
 | **Resize** | Resize image (and 2D targets) to the model input size (480 × 640). |
-| **ConvertPose** | Loads per-dataset object meshes from `coco_path/models/` and packs pose targets (R, t, sampled 3D model points) into the target dict. |
+| **ConvertPose** | Encodes the GT translation relative to the box (`rx, ry, log tz`) with each annotation's `cam_K`. |
 | **ConvertPILImage** | Converts PIL → float32 tensor with optional [0, 1] scaling. |
 | **ConvertBoxes** | Converts boxes to `cxcywh` and normalizes by image size. |
 
