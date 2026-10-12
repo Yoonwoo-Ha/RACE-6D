@@ -322,6 +322,22 @@ class RACE6DPostProcessor(nn.Module):
             results.append({k: v[b] for k, v in gathered.items()})
         return results
 
+    def use_model_offsets(self, model):
+        """Use the P saved with the model weights (decoder buffer aligned_offsets, per label) instead of the
+        config/dataset value. Call after loading a checkpoint; a model without the buffer leaves P unchanged."""
+        decoder = getattr(getattr(model, 'module', model), 'decoder', None)
+        p = getattr(decoder, 'aligned_offsets', None)
+        if p is None:
+            return
+        size = max(self.num_classes, len(self.mscoco_category2label), p.shape[0])
+        offsets = torch.zeros(size, 3, device=p.device)
+        offsets[:p.shape[0]] = p.detach().float()
+        self.has_aligned_offsets = bool(offsets.abs().sum() > 0)
+        if '_aligned_offsets' in self._buffers:
+            self._aligned_offsets = offsets.to(self._aligned_offsets.device)
+        else:
+            self.register_buffer('_aligned_offsets', offsets, persistent=False)
+
     def deploy(self, ):
         self.eval()
         self.deploy_mode = True

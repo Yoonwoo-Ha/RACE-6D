@@ -157,6 +157,8 @@ def evaluate(
     model.eval()
     criterion.eval()
     coco_evaluator.cleanup()
+    if hasattr(postprocessor, "use_model_offsets"):
+        postprocessor.use_model_offsets(model)  # P of the evaluated weights
 
     mscoco_label2category = getattr(criterion, "mscoco_label2category", {})
 

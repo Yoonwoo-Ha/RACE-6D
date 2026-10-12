@@ -101,9 +101,29 @@ class BaseSolver(object):
         if self.cfg.resume:
             print(f'Resume checkpoint from {self.cfg.resume}')
             self.load_resume_state(self.cfg.resume)
+        if self.cfg.resume or self.cfg.tuning:
+            self._check_aligned_offsets()
         
         # if self.del_optimizer:
         #     self.optimizer = self.cfg.optimizer
+
+    def _check_aligned_offsets(self, tol_mm=1e-3):
+        """Warn when the P saved with the loaded weights differs from the P the training data is moved by."""
+        decoder = getattr(dist_utils.de_parallel(self.model), 'decoder', None)
+        p = getattr(decoder, 'aligned_offsets', None)
+        if p is None:
+            return
+        model_p = {decoder.mscoco_label2category[i]: p[i].tolist() for i in range(p.shape[0]) if p[i].abs().sum() > 0}
+        dataset = self.train_dataloader.dataset
+        for d in getattr(dataset, 'datasets', [dataset]):
+            data_p = getattr(d, 'paligned_values', None)
+            if data_p is None:
+                continue
+            same = set(model_p) == set(data_p) and all(
+                max(abs(a - b) for a, b in zip(model_p[k], data_p[k])) <= tol_mm for k in model_p)
+            if not same:
+                print(f'WARNING: the loaded weights were trained with P {model_p}, but the training data uses P '
+                      f'{data_p}. Set the top-level aligned_offsets to the P of the weights.')
 
     def seed_change(self, seed):
         self.train_dataloader = dist_utils.warp_loader(self.cfg.train_dataloader, \

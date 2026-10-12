@@ -563,7 +563,8 @@ class RACE6DTransformer_DQE(nn.Module):
             self.register_buffer('anchors_bbox', anchors_bbox)
             self.register_buffer('valid_mask', valid_mask)
 
-        # pose info (stored as buffer → included in checkpoint)
+        # pose info: keypoints_3d and aligned_offsets are saved in the checkpoint; model points, diameters and
+        # symmetries are rebuilt from the dataset (training only)
         self._has_pose_info = coco_path is not None
         if self._has_pose_info:
             self._load_pose_info(coco_path, category_file, max_sym_disc_step, symmetry_override, aligned_offsets)
@@ -640,6 +641,14 @@ class RACE6DTransformer_DQE(nn.Module):
         offsets = resolve_aligned_offsets(aligned_offsets, coco_path)
         if offsets:
             print(f'Aligned model frame, P (mm): {offsets}')
+        # P per label, saved in the checkpoint: the postprocessor returns BOP poses with the P the weights were
+        # trained with (a checkpoint without it keeps this config/dataset value)
+        offsets_by_label = torch.zeros(len(valid_label_ids), 3)
+        for label_id in valid_label_ids:
+            category_id = self.mscoco_label2category[label_id]
+            if category_id in offsets:
+                offsets_by_label[label_id] = torch.tensor(offsets[category_id], dtype=torch.float32)
+        self.register_buffer('aligned_offsets', offsets_by_label)
 
         # 1. keypoints_3d
         keypoints_3d, edges_mask = self._load_keypoints_3d_and_edges(coco_path, offsets)
@@ -701,9 +710,9 @@ class RACE6DTransformer_DQE(nn.Module):
             sym_mats = self._build_symmetry_matrices(obj_info, max_sym_disc_step)
             sym_list.append(torch.stack(sym_mats, 0))  # [S_i, 3, 3]
 
-        # 5. Convert to padded tensors and register_buffer
-        self.register_buffer('diameters', torch.tensor(diameters_list, dtype=torch.float32))  # [C]
-        self.register_buffer('points_3d', torch.stack(points_3d_list, 0))  # [C, 1500, 3]
+        # 5. Convert to padded tensors (not saved: always rebuilt from the dataset and its P)
+        self.register_buffer('diameters', torch.tensor(diameters_list, dtype=torch.float32), persistent=False)  # [C]
+        self.register_buffer('points_3d', torch.stack(points_3d_list, 0), persistent=False)  # [C, 1500, 3]
 
         # sym_rotations: number of symmetries varies per class, so padding is needed
         max_S = max(s.shape[0] for s in sym_list)
@@ -713,8 +722,18 @@ class RACE6DTransformer_DQE(nn.Module):
             S_i = s.shape[0]
             sym_padded[i, :S_i] = s
             sym_counts[i] = S_i
-        self.register_buffer('sym_rotations', sym_padded)  # [C, max_S, 3, 3]
-        self.register_buffer('sym_counts', sym_counts)      # [C]
+        self.register_buffer('sym_rotations', sym_padded, persistent=False)  # [C, max_S, 3, 3]
+        self.register_buffer('sym_counts', sym_counts, persistent=False)      # [C]
+
+    _UNSAVED_POSE_BUFFERS = ('points_3d', 'diameters', 'sym_rotations', 'sym_counts')
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Older checkpoints also stored the training-only pose buffers and no aligned_offsets
+        for name in self._UNSAVED_POSE_BUFFERS:
+            state_dict.pop(prefix + name, None)
+        if self._has_pose_info and prefix + 'aligned_offsets' not in state_dict:
+            state_dict[prefix + 'aligned_offsets'] = self.aligned_offsets.clone()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @staticmethod
     def _load_cam_K(coco_path):

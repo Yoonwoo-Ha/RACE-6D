@@ -87,7 +87,8 @@ BOP server.
 YCB-V objects 19 and 20 and ITODD object 2 are trained in a model frame moved to a point `P` on their symmetry axis, so
 their symmetries become pure rotations. RACE-6D reads `P` from `{coco_path}/p_values.json` and applies it when it loads
 the data (model points and keypoints `-P`, GT poses `t + R @ P`); the postprocessor returns poses in the original BOP
-frame (`t - R @ P`). The configs carry no `P`. T-LESS objects 25 and 26 are trained as asymmetric objects
+frame (`t - R @ P`). The configs carry no `P`; it is saved in the checkpoint, so a trained model keeps its `P` even if
+`p_values.json` changes later. T-LESS objects 25 and 26 are trained as asymmetric objects
 (`symmetry_override`).
 
 ## 🧠 Pretrained Checkpoints
@@ -214,7 +215,7 @@ off by default); see [src/zoo/race6d/depth_refine.md](src/zoo/race6d/depth_refin
 |-----|-------|--------|
 | `rot_repr` | top level (shared by decoder, criterion, matcher and postprocessor) | `ego` (default, released checkpoints): the network regresses the camera-frame rotation. `allo`: it regresses the allocentric rotation, converted to egocentric with the translation direction (GT in training, prediction at inference). |
 | `depth_norm` | RGB-D dataset | `clip_zmax` (default) or `meters` |
-| `aligned_offsets` | top level (shared by decoder, dataset and postprocessor) | P `{category_id: [x, y, z]}` in mm of the objects trained in a shifted model frame (YCB-V 19/20, ITODD 2): model points and keypoints `-P`, GT poses `t + R @ P`, BOP output `t - R @ P`. Unset (default): read from `{coco_path}/p_values.json` (bop_toolkit_race6d `prepare_race6d_models.py --install_to`); `none`: no shift |
+| `aligned_offsets` | top level (shared by decoder, dataset and postprocessor) | P `{category_id: [x, y, z]}` in mm of the objects trained in a shifted model frame (YCB-V 19/20, ITODD 2): model points and keypoints `-P`, GT poses `t + R @ P`, BOP output `t - R @ P`. Unset (default): read from `{coco_path}/p_values.json` (bop_toolkit_race6d `prepare_race6d_models.py --install_to`); `none`: no shift. P is saved in the checkpoint with the 3D keypoints, and evaluation/`bop.py` use the saved value; checkpoints without it use this setting |
 | `iou_threshold` | `HungarianMatcher` | drops matched pairs whose box IoU is below it (`0`, the default, keeps all) |
 | `eval_idx` | `RACE6DTransformer_DQE` | decoder layer used at inference (`-1` = last), also with `vis_enc: True` |
 | `depth_refine` | `RACE6DPostProcessor` | test-time depth refinement of the translation, see [depth_refine.md](src/zoo/race6d/depth_refine.md) (off by default) |
