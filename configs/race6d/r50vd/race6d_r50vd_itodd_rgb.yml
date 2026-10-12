@@ -125,8 +125,6 @@ train_dataloader:
     scales: ~
   total_batch_size: 16
 
-# ITODD test GT is not public. Evaluate on an annotated set: the official validation split exported with
-# bop_toolkit_race6d (--dataset itodd --split val -> ~/Downloads/itodd/itodd2coco_val_amodal/) or your own set.
 val_dataloader:
   dataset:
     img_folder: ~/Downloads/itodd/itodd2coco_test_eval_amodal/val2017/

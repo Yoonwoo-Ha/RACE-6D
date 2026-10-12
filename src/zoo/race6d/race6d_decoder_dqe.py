@@ -613,7 +613,10 @@ class RACE6DTransformer_DQE(nn.Module):
 
     def _load_pose_info(self, coco_path, category_file, max_sym_disc_step=0.01, symmetry_override=None,
                         aligned_offsets=None):
-        """Load pose-related data and store via register_buffer.
+        """Category mapping, P and 3D keypoints (saved in the checkpoint, so the files are optional for inference).
+
+        The model points, diameters and symmetries from models_info.json and the PLY meshes are used only by the
+        loss, the matcher and the query denoising; load_training_pose_info() reads them when training starts.
 
         symmetry_override: {category_id: 'none' | {symmetries_discrete / symmetries_continuous}} replaces the
         models_info symmetries of these objects in training (loss, matching, denoising). 'none' trains the object
@@ -622,7 +625,6 @@ class RACE6DTransformer_DQE(nn.Module):
         original-frame keypoints of these objects are moved by -P, matching the dataset's t + R @ P.
         """
         import yaml
-        import open3d as o3d
 
         coco_path = os.path.expanduser(coco_path)
 
@@ -636,45 +638,46 @@ class RACE6DTransformer_DQE(nn.Module):
 
         self.mscoco_category2label = {k: idx for idx, k in enumerate(mscoco_category2name.keys())}
         self.mscoco_label2category = {v: k for k, v in self.mscoco_category2label.items()}
-        valid_label_ids = list(self.mscoco_label2category.keys())
+        num_labels = len(self.mscoco_label2category)
 
         offsets = resolve_aligned_offsets(aligned_offsets, coco_path)
         if offsets:
             print(f'Aligned model frame, P (mm): {offsets}')
         # P per label, saved in the checkpoint: the postprocessor returns BOP poses with the P the weights were
         # trained with (a checkpoint without it keeps this config/dataset value)
-        offsets_by_label = torch.zeros(len(valid_label_ids), 3)
-        for label_id in valid_label_ids:
-            category_id = self.mscoco_label2category[label_id]
+        offsets_by_label = torch.zeros(num_labels, 3)
+        for label_id, category_id in self.mscoco_label2category.items():
             if category_id in offsets:
                 offsets_by_label[label_id] = torch.tensor(offsets[category_id], dtype=torch.float32)
         self.register_buffer('aligned_offsets', offsets_by_label)
 
-        # 1. keypoints_3d
-        keypoints_3d, edges_mask = self._load_keypoints_3d_and_edges(coco_path, offsets)
+        # 3D keypoints per label, saved in the checkpoint
+        keypoints_3d, edges_mask = self._load_keypoints_3d_and_edges(coco_path, self.mscoco_category2label, offsets)
         self.register_buffer('keypoints_3d', keypoints_3d)
         self.edges_mask = edges_mask
 
-        # 3. Load models_info
+        # Training-only data, read by load_training_pose_info()
+        self.models_info = {}
+        self._training_pose_args = (coco_path, max_sym_disc_step, symmetry_override, offsets)
+        self._training_pose_loaded = False
+
+    def load_training_pose_info(self):
+        """Model points, diameters and symmetries for the loss, the matcher and the query denoising (not saved in
+        the checkpoint; rebuilt from models_info.json and the PLY meshes with the dataset's P). Idempotent."""
+        if not self._has_pose_info or self._training_pose_loaded:
+            return
+        import open3d as o3d
+
+        coco_path, max_sym_disc_step, symmetry_override, offsets = self._training_pose_args
+        device = self.keypoints_3d.device
         models_info_path = os.path.join(coco_path, 'models', 'models_info.json')
-        if os.path.exists(models_info_path):
-            with open(models_info_path, 'r') as f:
-                original_models_info = json.load(f)
-        else:
-            print(f'File not found: {models_info_path}')
-            original_models_info = {}
+        with open(models_info_path, 'r') as f:
+            original_models_info = json.load(f)
 
         self.models_info = {}
-
-        # 4. Collect per-class data (temporary dict → convert to padded tensor later)
-        C = len(valid_label_ids)
         num_model_points = 1500
-
-        diameters_list = []
-        points_3d_list = []
-        sym_list = []
-
-        for label_id in valid_label_ids:
+        diameters_list, points_3d_list, sym_list = [], [], []
+        for label_id in sorted(self.mscoco_label2category):
             category_id = self.mscoco_label2category[label_id]
             category_key = str(category_id)
 
@@ -689,15 +692,12 @@ class RACE6DTransformer_DQE(nn.Module):
             if symmetry_override and category_id in symmetry_override:
                 obj_info = self._override_symmetry(obj_info, symmetry_override[category_id])
             self.models_info[label_id] = obj_info
-
-            # Diameter
-            diameter_mm = obj_info.get('diameter', 0)
-            diameters_list.append(diameter_mm)
+            diameters_list.append(obj_info.get('diameter', 0))
 
             # 3D model points (FPS sampled)
             model_path = os.path.join(coco_path, 'models', f'obj_{category_id:06d}.ply')
             if os.path.exists(model_path):
-                points = self._load_model_points(o3d, model_path, num_model_points)
+                points = self._load_model_points(o3d, model_path, num_model_points, seed=category_id)
                 # A legacy mesh already moved on disk by -P (original kept as *.backup_paligned) is not moved again
                 if category_id in offsets and not os.path.exists(model_path + '.backup_paligned'):
                     points = points - torch.tensor(offsets[category_id], dtype=points.dtype)
@@ -706,33 +706,42 @@ class RACE6DTransformer_DQE(nn.Module):
                 print(f'Model file not found: {model_path}')
                 points_3d_list.append(torch.zeros(num_model_points, 3))
 
-            # Symmetry transforms
             sym_mats = self._build_symmetry_matrices(obj_info, max_sym_disc_step)
             sym_list.append(torch.stack(sym_mats, 0))  # [S_i, 3, 3]
 
-        # 5. Convert to padded tensors (not saved: always rebuilt from the dataset and its P)
-        self.register_buffer('diameters', torch.tensor(diameters_list, dtype=torch.float32), persistent=False)  # [C]
-        self.register_buffer('points_3d', torch.stack(points_3d_list, 0), persistent=False)  # [C, 1500, 3]
-
-        # sym_rotations: number of symmetries varies per class, so padding is needed
+        # Padded tensors, not saved in the checkpoint
+        C = len(sym_list)
         max_S = max(s.shape[0] for s in sym_list)
         sym_padded = torch.zeros(C, max_S, 3, 3)
         sym_counts = torch.zeros(C, dtype=torch.long)
         for i, s in enumerate(sym_list):
-            S_i = s.shape[0]
-            sym_padded[i, :S_i] = s
-            sym_counts[i] = S_i
-        self.register_buffer('sym_rotations', sym_padded, persistent=False)  # [C, max_S, 3, 3]
-        self.register_buffer('sym_counts', sym_counts, persistent=False)      # [C]
+            sym_padded[i, :s.shape[0]] = s
+            sym_counts[i] = s.shape[0]
+        self.register_buffer('diameters', torch.tensor(diameters_list, dtype=torch.float32, device=device),
+                             persistent=False)  # [C]
+        self.register_buffer('points_3d', torch.stack(points_3d_list, 0).to(device), persistent=False)  # [C, 1500, 3]
+        self.register_buffer('sym_rotations', sym_padded.to(device), persistent=False)  # [C, max_S, 3, 3]
+        self.register_buffer('sym_counts', sym_counts.to(device), persistent=False)      # [C]
+        self._training_pose_loaded = True
 
     _UNSAVED_POSE_BUFFERS = ('points_3d', 'diameters', 'sym_rotations', 'sym_counts')
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        # Older checkpoints also stored the training-only pose buffers and no aligned_offsets
+        # Older checkpoints also stored the training-only pose buffers, no aligned_offsets, and keypoints_3d
+        # indexed by category_id - 1 instead of by label
         for name in self._UNSAVED_POSE_BUFFERS:
             state_dict.pop(prefix + name, None)
-        if self._has_pose_info and prefix + 'aligned_offsets' not in state_dict:
-            state_dict[prefix + 'aligned_offsets'] = self.aligned_offsets.clone()
+        if self._has_pose_info:
+            if prefix + 'aligned_offsets' not in state_dict:
+                state_dict[prefix + 'aligned_offsets'] = self.aligned_offsets.clone()
+            key = prefix + 'keypoints_3d'
+            stored = state_dict.get(key)
+            if stored is not None and stored.shape != self.keypoints_3d.shape:
+                by_label = self.keypoints_3d.clone()
+                for label_id, category_id in self.mscoco_label2category.items():
+                    if category_id - 1 < stored.shape[0]:
+                        by_label[label_id] = stored[category_id - 1]
+                state_dict[key] = by_label
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @staticmethod
@@ -752,7 +761,7 @@ class RACE6DTransformer_DQE(nn.Module):
         return torch.tensor(cam_K_list, dtype=torch.float32)
 
     @staticmethod
-    def _load_model_points(o3d, file_path, num_samples=1500):
+    def _load_model_points(o3d, file_path, num_samples=1500, seed=0):
         """Sample points uniformly on the PLY surface, then FPS for coverage.
 
         Reading raw vertices (o3d.io.read_point_cloud) skipped FPS for low-poly meshes
@@ -762,6 +771,7 @@ class RACE6DTransformer_DQE(nn.Module):
         """
         mesh = o3d.io.read_triangle_mesh(file_path)
         if mesh.has_triangles():
+            o3d.utility.random.seed(int(seed))  # same points on every rank and run
             seed_n = max(num_samples * 4, 5000)
             pcd = mesh.sample_points_uniformly(number_of_points=seed_n)
             points = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
@@ -780,26 +790,29 @@ class RACE6DTransformer_DQE(nn.Module):
         return points[:num_samples]
 
     @staticmethod
-    def _load_keypoints_3d_and_edges(coco_path, offsets=None):
-        """Load 32 3D keypoints and edges_mask from JSON file.
+    def _load_keypoints_3d_and_edges(coco_path, category2label, offsets=None):
+        """32 3D keypoints per label [num_labels, 32, 3] and the edges of cached_keypoints_3d_edge.json.
 
         A cache from bop_toolkit_race6d is in the original BOP frame (metadata.coordinate_system) and is moved by
-        -P here; a legacy cache without it is used as stored (it was built in the training frame).
+        -P here; a legacy cache without it is used as stored (it was built in the training frame). Without the file
+        (inference), the keypoints are zeros and come from the checkpoint.
         """
+        keypoints_3d = torch.zeros(len(category2label), 32, 3)
         keypoints_path = os.path.join(coco_path, 'cached_keypoints_3d_edge.json')
+        if not os.path.exists(keypoints_path):
+            return keypoints_3d, {}
         with open(keypoints_path, 'r') as f:
             data = json.load(f)
-        keypoints_3d_data = data['keypoints_3d']
-        edges_mask_data = data['edges_mask']
         original_frame = data.get('metadata', {}).get('coordinate_system') == 'original_bop_model_frame'
-        max_class_id = max(int(k) for k in keypoints_3d_data.keys())
-        keypoints_3d = torch.zeros(max_class_id + 1, 32, 3)
-        for class_id_str, keypoints in keypoints_3d_data.items():
+        for class_id_str, keypoints in data['keypoints_3d'].items():
             class_id = int(class_id_str)
-            keypoints_3d[class_id - 1] = torch.tensor(keypoints, dtype=torch.float32)
+            if class_id not in category2label:
+                continue
+            kp = torch.tensor(keypoints, dtype=torch.float32)
             if original_frame and offsets and class_id in offsets:
-                keypoints_3d[class_id - 1] -= torch.tensor(offsets[class_id], dtype=torch.float32)
-        return keypoints_3d, edges_mask_data
+                kp = kp - torch.tensor(offsets[class_id], dtype=torch.float32)
+            keypoints_3d[category2label[class_id]] = kp
+        return keypoints_3d, data['edges_mask']
 
     @staticmethod
     def _override_symmetry(obj_info, override):
@@ -845,6 +858,7 @@ class RACE6DTransformer_DQE(nn.Module):
     # Dict conversion helpers (used externally by criterion etc.)
     def get_sym_cache(self) -> Dict[int, torch.Tensor]:
         """Convert buffer → {label_id: [S, 3, 3]} dict."""
+        self.load_training_pose_info()
         result = {}
         valid_label_ids = list(self.mscoco_label2category.keys())
         for i, label_id in enumerate(valid_label_ids):
@@ -854,6 +868,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
     def get_points_3d_cache(self) -> Dict[int, torch.Tensor]:
         """Convert buffer → {label_id: [P, 3]} dict."""
+        self.load_training_pose_info()
         result = {}
         valid_label_ids = list(self.mscoco_label2category.keys())
         for i, label_id in enumerate(valid_label_ids):
@@ -862,6 +877,7 @@ class RACE6DTransformer_DQE(nn.Module):
 
     def get_diameter_cache(self) -> Dict[int, float]:
         """Convert buffer → {label_id: float} dict."""
+        self.load_training_pose_info()
         result = {}
         valid_label_ids = list(self.mscoco_label2category.keys())
         for i, label_id in enumerate(valid_label_ids):
@@ -1063,6 +1079,7 @@ class RACE6DTransformer_DQE(nn.Module):
             _orig = targets[0]['orig_size']  # BOP convention: [W, H]
             img_w, img_h = int(_orig[0].item()), int(_orig[1].item())
 
+            self.load_training_pose_info()
             dn_result = get_pose_denoising_training_group(
                 targets,
                 enc_bbox, enc_kpt, enc_trans, enc_rot,

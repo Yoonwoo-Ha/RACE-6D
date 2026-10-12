@@ -334,7 +334,7 @@ class RACE6DCriterion_addr(nn.Module):
             py = Kg[:, 1, 2][:, None, None]
 
             # Load 32 3D keypoints
-            kp3d_cls = self.keypoints_3d[category_id - 1].to(device)  # [32,3]
+            kp3d_cls = self.keypoints_3d[label_id].to(device)  # [32,3] (indexed by label)
             kp3d = kp3d_cls.unsqueeze(0).expand(M, -1, -1)              # [M,32,3]
 
             # Fetch symmetry transforms from the cache

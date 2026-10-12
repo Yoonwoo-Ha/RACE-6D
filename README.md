@@ -74,15 +74,16 @@ All training data is prepared from the original BOP archives with the
 (`scripts/prepare_race6d_models.py --install_to`). The toolkit expects raw datasets under `~/Downloads/<dataset>/` by
 default; the guide explains how to use a different location.
 
-Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_*.yml` to match your local layout. The
-dataset folder (`coco_path`) must contain the original `models/` (with `models_info.json`),
-`cached_keypoints_3d_edge.json` and `p_values.json`; the model reads them when it is built.
+Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_*.yml` to match your local layout. For
+training, the dataset folder (`coco_path`) must contain the original `models/` (with `models_info.json`),
+`cached_keypoints_3d_edge.json` and `p_values.json`. The 3D keypoints and `P` are saved in the checkpoint, so inference
+needs only the checkpoint, the config and its category file.
 
 #### HB and ITODD evaluation
 
-The BOP test ground truth of HB and ITODD is not public. Export their official validation splits with the toolkit
-(`--split val`) and point the `val_dataloader` of the HB/ITODD configs to that output; test results are scored by the
-BOP server.
+The BOP test ground truth of HB and ITODD is not public, so their configs evaluate on the official validation split,
+exported by the toolkit as `hb2coco_test_eval_amodal` / `itodd2coco_test_eval_amodal` (see its recipe). Test results
+are scored by the BOP server.
 
 #### Objects with an off-origin symmetry axis
 
