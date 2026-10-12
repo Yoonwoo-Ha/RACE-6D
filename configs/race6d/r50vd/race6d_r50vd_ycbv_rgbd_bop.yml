@@ -3,11 +3,20 @@ __include__: [
 ]
 
 # Inference config for the released (migrated) YCB-V RGB-D weights. The training config already gives the same
-# predictions (its eval_idx sets the output layer); this file turns off the auxiliary outputs and sets the
-# objects 19/20 offsets the released weights were trained with (sub/README.md).
+# predictions (its eval_idx sets the output layer); this file turns off the auxiliary outputs, restores the
+# activations the weights were trained with (the training config now uses GELU / SiLU) and sets the
+# objects 19/20 offsets the released weights were trained with.
+aligned_offsets: {19: [10.4796698, -5.41739619, -1.23077576], 20: [-8.82785585, -10.93032056, 0.09932552]}
+
 RACE6DTransformer_DQE:
+  activation: relu
+  mlp_act: quick_gelu
+  enc_mlp_act: relu
+  dec_mlp_act: quick_gelu
   vis_enc: False
 
 RACE6DPostProcessor:
   vis_enc: False
-  aligned_offsets: {19: [10.4796698, -5.41739619, -1.23077576], 20: [-8.82785585, -10.93032056, 0.09932552]}
+
+HybridEncoder:
+  enc_act: quick_gelu

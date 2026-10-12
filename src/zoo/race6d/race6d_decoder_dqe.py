@@ -26,6 +26,7 @@ from .utils import check_rot_repr
 
 from .denoising import get_pose_denoising_training_group
 from ...core import register
+from ...misc.aligned_frame import resolve_aligned_offsets
 
 __all__ = ['RACE6DTransformer_DQE']
 
@@ -421,7 +422,7 @@ class TransformerDecoder(nn.Module):
 
 @register()
 class RACE6DTransformer_DQE(nn.Module):
-    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file', 'rot_repr']
+    __share__ = ['num_classes', 'eval_spatial_size', 'coco_path', 'category_file', 'rot_repr', 'aligned_offsets']
 
     def __init__(self,
                  num_classes=80,
@@ -454,6 +455,7 @@ class RACE6DTransformer_DQE(nn.Module):
                  category_file=None,
                  max_sym_disc_step=0.01,
                  symmetry_override=None,
+                 aligned_offsets=None,
                  num_denoising=100,
                  label_noise_ratio=0.5,
                  box_noise_scale=1.0,
@@ -564,7 +566,7 @@ class RACE6DTransformer_DQE(nn.Module):
         # pose info (stored as buffer → included in checkpoint)
         self._has_pose_info = coco_path is not None
         if self._has_pose_info:
-            self._load_pose_info(coco_path, category_file, max_sym_disc_step, symmetry_override)
+            self._load_pose_info(coco_path, category_file, max_sym_disc_step, symmetry_override, aligned_offsets)
 
         self._reset_parameters()
 
@@ -608,12 +610,15 @@ class RACE6DTransformer_DQE(nn.Module):
 
     # ==================== Pose Info Loading ====================
 
-    def _load_pose_info(self, coco_path, category_file, max_sym_disc_step=0.01, symmetry_override=None):
+    def _load_pose_info(self, coco_path, category_file, max_sym_disc_step=0.01, symmetry_override=None,
+                        aligned_offsets=None):
         """Load pose-related data and store via register_buffer.
 
         symmetry_override: {category_id: 'none' | {symmetries_discrete / symmetries_continuous}} replaces the
         models_info symmetries of these objects in training (loss, matching, denoising). 'none' trains the object
         as asymmetric. BOP evaluation keeps the official symmetries.
+        aligned_offsets: P per category_id (see misc.aligned_frame.resolve_aligned_offsets). Model points and
+        original-frame keypoints of these objects are moved by -P, matching the dataset's t + R @ P.
         """
         import yaml
         import open3d as o3d
@@ -632,8 +637,12 @@ class RACE6DTransformer_DQE(nn.Module):
         self.mscoco_label2category = {v: k for k, v in self.mscoco_category2label.items()}
         valid_label_ids = list(self.mscoco_label2category.keys())
 
+        offsets = resolve_aligned_offsets(aligned_offsets, coco_path)
+        if offsets:
+            print(f'Aligned model frame, P (mm): {offsets}')
+
         # 1. keypoints_3d
-        keypoints_3d, edges_mask = self._load_keypoints_3d_and_edges(coco_path)
+        keypoints_3d, edges_mask = self._load_keypoints_3d_and_edges(coco_path, offsets)
         self.register_buffer('keypoints_3d', keypoints_3d)
         self.edges_mask = edges_mask
 
@@ -680,6 +689,9 @@ class RACE6DTransformer_DQE(nn.Module):
             model_path = os.path.join(coco_path, 'models', f'obj_{category_id:06d}.ply')
             if os.path.exists(model_path):
                 points = self._load_model_points(o3d, model_path, num_model_points)
+                # A legacy mesh already moved on disk by -P (original kept as *.backup_paligned) is not moved again
+                if category_id in offsets and not os.path.exists(model_path + '.backup_paligned'):
+                    points = points - torch.tensor(offsets[category_id], dtype=points.dtype)
                 points_3d_list.append(points)
             else:
                 print(f'Model file not found: {model_path}')
@@ -749,18 +761,25 @@ class RACE6DTransformer_DQE(nn.Module):
         return points[:num_samples]
 
     @staticmethod
-    def _load_keypoints_3d_and_edges(coco_path):
-        """Load 32 3D keypoints and edges_mask from JSON file."""
+    def _load_keypoints_3d_and_edges(coco_path, offsets=None):
+        """Load 32 3D keypoints and edges_mask from JSON file.
+
+        A cache from bop_toolkit_race6d is in the original BOP frame (metadata.coordinate_system) and is moved by
+        -P here; a legacy cache without it is used as stored (it was built in the training frame).
+        """
         keypoints_path = os.path.join(coco_path, 'cached_keypoints_3d_edge.json')
         with open(keypoints_path, 'r') as f:
             data = json.load(f)
         keypoints_3d_data = data['keypoints_3d']
         edges_mask_data = data['edges_mask']
+        original_frame = data.get('metadata', {}).get('coordinate_system') == 'original_bop_model_frame'
         max_class_id = max(int(k) for k in keypoints_3d_data.keys())
         keypoints_3d = torch.zeros(max_class_id + 1, 32, 3)
         for class_id_str, keypoints in keypoints_3d_data.items():
             class_id = int(class_id_str)
             keypoints_3d[class_id - 1] = torch.tensor(keypoints, dtype=torch.float32)
+            if original_frame and offsets and class_id in offsets:
+                keypoints_3d[class_id - 1] -= torch.tensor(offsets[class_id], dtype=torch.float32)
         return keypoints_3d, edges_mask_data
 
     @staticmethod

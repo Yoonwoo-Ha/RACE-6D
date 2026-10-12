@@ -2178,6 +2178,262 @@ class BackgroundReplacement:
         return (result_image, target)
 
 
+# ============================================================================
+# Large-surface augmentation (RGB-D): upright panels / boxes standing on the scene floor
+# ============================================================================
+
+
+def _ps_fit_floor(depth_mm, K, objmask, valid, iters=100):
+    """RANSAC plane of the depth outside the objects: (point on plane, unit normal towards the camera, inlier points)."""
+    ys, xs = np.where(valid & ~objmask)
+    if len(xs) < 500:
+        return None
+    s = np.random.randint(0, len(xs), 4000)
+    ys, xs = ys[s], xs[s]
+    X = (np.linalg.inv(K) @ np.stack([xs, ys, np.ones_like(xs)]).astype(np.float64)).T * depth_mm[ys, xs][:, None]
+    best_n, best_inl = 0, None
+    for _ in range(iters):
+        p = X[np.random.choice(len(X), 3, replace=False)]
+        n = np.cross(p[1] - p[0], p[2] - p[0])
+        if np.linalg.norm(n) < 1e-6:
+            continue
+        n /= np.linalg.norm(n)
+        inl = np.abs(X @ n - n @ p[0]) < 8.0
+        if inl.sum() > best_n:
+            best_n, best_inl = int(inl.sum()), inl
+    if best_inl is None or best_n < 0.3 * len(X):
+        return None
+    Y = X[best_inl]
+    c = Y.mean(0)
+    n = np.linalg.svd(Y - c, full_matrices=False)[2][-1]
+    if n @ (-c) < 0:
+        n = -n
+    return c, n, Y
+
+
+def _ps_ray_box(dirs, C, Rb, half):
+    """First hit of the rays `dirs` [..., 3] (z = 1, so the hit parameter is the depth) with an oriented box.
+    Returns depth (0 = miss), the hit face axis, its sign and the hit point in box coordinates."""
+    o = Rb.T @ (-C)
+    d = dirs @ Rb
+    d = np.where(np.abs(d) < 1e-9, 1e-9, d)
+    t1 = (-half - o) / d
+    t2 = (half - o) / d
+    tn = np.minimum(t1, t2)
+    tf = np.maximum(t1, t2)
+    tmin = tn.max(-1)
+    hit = (tf.min(-1) >= tmin) & (tmin > 0)
+    ax = tn.argmax(-1)
+    t1a = np.take_along_axis(t1, ax[..., None], -1)[..., 0]
+    t2a = np.take_along_axis(t2, ax[..., None], -1)[..., 0]
+    sgn = np.where(t1a > t2a, 1.0, -1.0)
+    p = o + tmin[..., None] * d
+    return np.where(hit, tmin, 0.0), ax, sgn, p
+
+
+@register()
+class PasteSurfaces(nn.Module):
+    """Large upright surfaces for RGB-D training (monitor / wall-like panels and boxes).
+
+    The LM-O RGB-D model fails on the real desk because of large tall surfaces in the scene depth (monitor, laptop,
+    walls, big clutter masses), which LM PBR scenes do not contain (diagnostics lmo_rgbd_scale_abcd_claude_20261009,
+    twin A/B/C). This op fits the floor plane of the sample's depth (RANSAC outside the annotated objects), stands
+    n_range panels (thin, wide, tall, roughly facing the camera) or boxes on it, `p_behind` of them farther than the
+    targets, and ray-casts them into the depth (z-buffer) and the RGB (texture from `background_dir`, Lambert shading).
+    A placement must cover >= min_area of the image and hide <= max_cover of every target's visible mask (checked on
+    a coarse grid). Visible masks and visibility are reduced where a surface covers a target.
+
+    Place it first (before PoseAugmentation: the floor fit wants the unwarped depth; the roll keeps the pasted scene
+    consistent) and before DepthAugment (holes / noise then also apply to the surfaces). Sizes are in mm.
+    """
+
+    def __init__(
+        self,
+        p: float = 1.0,
+        n_range: Tuple[int, int] = (2, 5),
+        p_panel: float = 0.6,
+        p_behind: float = 0.5,
+        max_cover: float = 0.7,
+        min_area: float = 0.04,
+        tries: int = 20,
+        panel_size: Tuple[Tuple[float, float], ...] = ((300, 900), (15, 50), (250, 700)),
+        box_size: Tuple[Tuple[float, float], ...] = ((150, 500), (150, 500), (200, 500)),
+        background_dir: Optional[str] = None,
+        coarse_stride: int = 4,
+    ):
+        super().__init__()
+        self.p = float(p)
+        self.n_range = (int(n_range[0]), int(n_range[1]))
+        self.p_panel = float(p_panel)
+        self.p_behind = float(p_behind)
+        self.max_cover = float(max_cover)
+        self.min_area = float(min_area)
+        self.tries = int(tries)
+        self.panel_size = np.asarray(panel_size, dtype=np.float64)
+        self.box_size = np.asarray(box_size, dtype=np.float64)
+        bg_dir = os.path.expanduser(background_dir) if background_dir else None
+        self._textures = _load_background_list(bg_dir) if bg_dir else []
+        self.coarse_stride = int(coarse_stride)
+        self._dirs = {}
+
+    @staticmethod
+    def _return(image, target, dataset_info):
+        if dataset_info is not None:
+            return (image, target, dataset_info)
+        return (image, target)
+
+    def _texture(self):
+        if self._textures:
+            img = cv2.imread(self._textures[np.random.randint(len(self._textures))])
+            if img is not None:
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return np.full((64, 64, 3), np.random.randint(0, 256, 3), dtype=np.uint8)
+
+    def forward(self, *inputs):
+        if len(inputs) == 1 and isinstance(inputs[0], tuple):
+            inputs = inputs[0]
+        image = inputs[0]
+        target = inputs[1] if len(inputs) > 1 else {}
+        dataset_info = inputs[2] if len(inputs) > 2 else None
+        if (not isinstance(image, PILImage.Image) or not isinstance(target, dict) or "_depth_path" not in target
+                or dataset_info is None or not hasattr(dataset_info, "_load_depth_tensor") or "masks" not in target):
+            return self._return(image, target, dataset_info)
+        if np.random.rand() >= self.p:
+            return self._return(image, target, dataset_info)
+
+        depth_t = target.get("_depth_tensor")
+        if depth_t is None:
+            depth_t = dataset_info._load_depth_tensor(target["_depth_path"])
+        if depth_t is None:
+            return self._return(image, target, dataset_info)
+        W, H = image.size
+        dn = depth_t.squeeze(0).numpy().astype(np.float32)
+        if dn.shape != (H, W):
+            dn = cv2.resize(dn, (W, H), interpolation=cv2.INTER_NEAREST)
+        meters = getattr(dataset_info, "depth_norm", "clip_zmax") == "meters"
+        unit = 1000.0 if meters else float(getattr(dataset_info, "depth_z_max_mm", 2000.0))
+        depth = dn.astype(np.float64) * unit
+        valid = (dn > 0) & (meters | (dn < 1.0 - 1e-6))  # clipped far pixels are not used for the floor fit
+
+        cam_K = target.get("cam_K")
+        if cam_K is None:
+            return self._return(image, target, dataset_info)
+        ck = (cam_K[0] if cam_K.dim() > 1 else cam_K).numpy().astype(np.float64)
+        K = ck.reshape(3, 3).copy()
+        orig_size = target.get("orig_size")
+        if orig_size is not None:
+            ow, oh = (float(v) for v in torch.as_tensor(orig_size).flatten()[:2])
+            K[0] *= W / ow
+            K[1] *= H / oh
+
+        masks_obj = target["masks"]
+        masks = (masks_obj.numpy() if torch.is_tensor(masks_obj) else np.asarray(masks_obj)).astype(bool)
+        if masks.ndim != 3 or masks.shape[1:] != (H, W):
+            return self._return(image, target, dataset_info)
+        objm = masks.any(0) if len(masks) else np.zeros((H, W), bool)
+        fl = _ps_fit_floor(depth, K, objm, valid)
+        if fl is None:
+            return self._return(image, target, dataset_info)
+        c, n, Y = fl
+        ref = np.array([0.0, 0.0, 1.0]) if abs(n[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        ex = np.cross(n, ref)
+        ex /= np.linalg.norm(ex)
+        R = np.stack([ex, np.cross(n, ex), n], 1)  # floor frame: x, y on the floor, z up
+        tz = np.median(depth[objm & valid]) if (objm & valid).any() else np.median(depth[valid])
+
+        key = (H, W) + tuple(np.round(K[:2].ravel(), 3))
+        dirs = self._dirs.get(key)
+        if dirs is None:
+            uu, vv = np.meshgrid(np.arange(W, dtype=np.float64), np.arange(H, dtype=np.float64))
+            dirs = np.stack([(uu - K[0, 2]) / K[0, 0], (vv - K[1, 2]) / K[1, 1], np.ones_like(uu)], -1)
+            self._dirs = {key: dirs}  # one camera per dataset in practice; keep the last
+        s = self.coarse_stride
+        dirs_c, depth_c, masks_c = dirs[::s, ::s], depth[::s, ::s], masks[:, ::s, ::s]
+        areas_c = masks_c.reshape(len(masks_c), -1).sum(1)
+        far = np.where(dn > 0, depth, np.inf)  # holes count as far (a surface may cover them)
+        if not meters:
+            far = np.where(dn >= 1.0 - 1e-6, np.inf, far)
+        far_c = far[::s, ::s]
+
+        rgb = np.asarray(image).astype(np.float32)
+        out_depth = depth.copy()
+        covered = np.zeros((H, W), bool)
+        n_surf = np.random.randint(self.n_range[0], self.n_range[1] + 1)
+        behind_pts = Y[Y[:, 2] > tz + 50.0]
+        for _ in range(n_surf):
+            for _try in range(self.tries):
+                cand = behind_pts if (np.random.rand() < self.p_behind and len(behind_pts) > 50) else Y
+                base = cand[np.random.randint(len(cand))]
+                if np.random.rand() < self.p_panel:
+                    size = np.random.uniform(self.panel_size[:, 0], self.panel_size[:, 1])
+                    view = (base @ R)[:2]
+                    yaw = np.arctan2(view[1], view[0]) + np.pi / 2 + np.random.uniform(-0.8, 0.8)
+                else:
+                    size = np.random.uniform(self.box_size[:, 0], self.box_size[:, 1])
+                    yaw = np.random.uniform(0, np.pi)
+                Rb = R @ np.array([[np.cos(yaw), -np.sin(yaw), 0.0], [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+                C = base + n * size[2] / 2
+                z_c = _ps_ray_box(dirs_c, C, Rb, size / 2)[0]
+                cov_c = (z_c > 0) & (z_c < far_c - 1.0)
+                if cov_c.sum() < self.min_area * cov_c.size:
+                    continue
+                if len(masks_c) and np.any((masks_c & cov_c).reshape(len(masks_c), -1).sum(1) > self.max_cover * np.maximum(areas_c, 1)):
+                    continue
+                break
+            else:
+                continue
+            # full resolution only inside the coarse footprint (+ 2 coarse cells)
+            ys_c, xs_c = np.nonzero(cov_c)
+            y0, y1 = max(0, (ys_c.min() - 2) * s), min(H, (ys_c.max() + 3) * s)
+            x0, x1 = max(0, (xs_c.min() - 2) * s), min(W, (xs_c.max() + 3) * s)
+            roi = (slice(y0, y1), slice(x0, x1))
+            z, ax, sgn, pb = _ps_ray_box(dirs[roi], C, Rb, size / 2)
+            cov = (z > 0) & (z < far[roi] - 1.0)
+            # texture (u, v on the hit face, 1-3 mm per texel) and Lambert shading
+            tex = self._texture()
+            th, tw = tex.shape[:2]
+            mm_px = np.random.uniform(1.0, 3.0)
+            a1 = np.where(ax == 0, 1, 0)
+            a2 = np.where(ax == 2, 1, 2)
+            u = np.take_along_axis(pb, a1[..., None], -1)[..., 0]
+            v = np.take_along_axis(pb, a2[..., None], -1)[..., 0]
+            col = tex[np.floor(-v / mm_px).astype(np.int64) % th, np.floor(u / mm_px).astype(np.int64) % tw].astype(np.float32)
+            nrm = np.zeros(ax.shape + (3,))
+            np.put_along_axis(nrm, ax[..., None], sgn[..., None], -1)
+            L = R @ np.array([np.random.uniform(-0.5, 0.5), np.random.uniform(-0.5, 0.5), 1.0])
+            L /= np.linalg.norm(L)
+            amb = np.random.uniform(0.35, 0.6)
+            shade = amb + (1 - amb) * np.clip((nrm @ Rb.T) @ L, 0, 1)
+            if cov.any():
+                bright = np.clip(rgb[valid].mean() / max(col[cov].mean(), 1.0), 0.5, 1.5) if valid.any() else 1.0
+            else:
+                continue
+            col = np.clip(col * shade[..., None] * bright, 0, 255)
+            alpha = cv2.GaussianBlur(cov.astype(np.float32), (3, 3), 0)[..., None]
+            rgb[roi] = rgb[roi] * (1 - alpha) + col * alpha
+            out_depth[roi][cov] = z[cov]
+            far[roi][cov] = z[cov]
+            far_c = far[::s, ::s]
+            covered[roi] |= cov
+
+        if not covered.any():
+            return self._return(image, target, dataset_info)
+        new_target = dict(target)
+        dn2 = dn.copy()
+        dn2[covered] = (out_depth[covered] / unit) if meters else np.clip(out_depth[covered] / unit, 0.0, 1.0)
+        new_target["_depth_tensor"] = torch.from_numpy(dn2.astype(np.float32)).unsqueeze(0)
+        new_masks = masks & ~covered
+        mt = torch.from_numpy(new_masks.astype(np.uint8))
+        new_target["masks"] = Mask(mt) if isinstance(masks_obj, Mask) else mt
+        vis = target.get("visibility")
+        if vis is not None and len(masks):
+            old = masks.reshape(len(masks), -1).sum(1).astype(np.float32)
+            new = new_masks.reshape(len(masks), -1).sum(1).astype(np.float32)
+            f = torch.from_numpy(np.where(old > 0, new / np.maximum(old, 1.0), 1.0).astype(np.float32))
+            new_target["visibility"] = (torch.as_tensor(vis, dtype=torch.float32) * f).clamp(0.0, 1.0)
+        return self._return(PILImage.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)), new_target, dataset_info)
+
+
 def _depth_aug_image_border_mask(H: int, W: int, margin: int) -> np.ndarray:
     bm = np.zeros((H, W), dtype=bool)
     if margin > 0:

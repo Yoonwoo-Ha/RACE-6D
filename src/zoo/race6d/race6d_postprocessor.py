@@ -13,6 +13,7 @@ import os
 import yaml
 
 from ...core import register
+from ...misc.aligned_frame import resolve_aligned_offsets
 from .utils import allocentric_to_egocentric, check_rot_repr
 from .depth_refine import refine_translations_with_depth, sample_model_points
 
@@ -33,6 +34,8 @@ class RACE6DPostProcessor(nn.Module):
         'num_top_queries',
         'category_file',
         'rot_repr',
+        'coco_path',
+        'aligned_offsets',
     ]
 
     def __init__(
@@ -46,11 +49,13 @@ class RACE6DPostProcessor(nn.Module):
         aligned_offsets=None,
         rot_repr='ego',
         depth_refine=None,
+        coco_path=None,
     ) -> None:
         """
-        aligned_offsets: {category_id: [x, y, z] mm} for objects trained in an aligned model frame
-            (YCB-V 19/20: meshes shifted by -P with sub/process_models.py, poses by +R@P). When cam_K is
-            passed to forward(), their translations are returned in the original BOP frame (t - R@P).
+        aligned_offsets: P {category_id: [x, y, z] mm} of the objects trained in an aligned model frame
+            (YCB-V 19/20, ITODD 2: meshes and keypoints moved by -P, poses by +R@P). When cam_K is passed to
+            forward(), their translations are returned in the original BOP frame (t - R@P). Shared config key;
+            None reads {coco_path}/p_values.json (misc.aligned_frame.resolve_aligned_offsets).
         rot_repr: 'ego' or 'allo' (shared config key). For 'allo', the predicted rotation is converted to
             egocentric with the predicted translation direction when cam_K is passed to forward();
             without cam_K the raw allocentric rotation is returned.
@@ -87,6 +92,7 @@ class RACE6DPostProcessor(nn.Module):
             self.register_buffer('_label2cat_lut', lut)
 
         # Per-label model-frame offsets (non-persistent: checkpoints are unaffected)
+        aligned_offsets = resolve_aligned_offsets(aligned_offsets, coco_path)
         self.has_aligned_offsets = bool(aligned_offsets)
         if self.has_aligned_offsets:
             offsets = torch.zeros(max(self.num_classes, len(self.mscoco_category2label)), 3)

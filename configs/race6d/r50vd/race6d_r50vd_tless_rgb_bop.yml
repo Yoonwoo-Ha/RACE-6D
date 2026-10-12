@@ -1,0 +1,12 @@
+__include__: [
+  './race6d_r50vd_tless_rgb.yml',
+]
+
+# Inference config for the released T-LESS RGB checkpoint, trained with the activations below; the training config
+# now uses GELU (encoder) / SiLU (decoder, heads).
+HybridEncoder:
+  enc_act: quick_gelu
+
+RACE6DTransformer_DQE:
+  activation: quick_gelu
+  mlp_act: quick_gelu

@@ -8,6 +8,8 @@ __include__: [
 
 output_dir: ./output/race6d_r50vd_itodd_rgb
 coco_path: ~/Downloads/itodd/
+# Object 2 is trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit_race6d
+# scripts/prepare_race6d_models.py --install_to); a top-level aligned_offsets overrides it.
 category_file: ./configs/race6d/include/itodd2coco_category.yml
 num_classes: 28
 eval_spatial_size: [480, 640]
@@ -33,7 +35,6 @@ HybridEncoder:
   nhead: 8
   hidden_dim: 256
   depth_mult: 0.67
-  enc_act: quick_gelu
 
 RACE6DTransformer_DQE:
   feat_channels: [256, 256, 256]
@@ -45,20 +46,17 @@ RACE6DTransformer_DQE:
   vis_enc: True
   num_queries: 50
   eval_idx: -1
-  activation: quick_gelu
-  mlp_act: quick_gelu
 
 RACE6DPostProcessor:
   num_top_queries: 50
   vis_enc: True
   remap_mscoco_category: False
-  aligned_offsets: {2: [0.0, 5.344601, 1.363572]}
 
 RACE6DCriterion_addr:
   weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
   losses: ['vfl', 'boxes', 'pose', 'keypoint']
   alpha: 0.75
-  gamma_pos: 1.5
+  gamma_pos: 1.0
   gamma_neg: 2.0
   compute_aux_metrics: False  # ITODD: skip metric computation for aux/enc layers (speeds up training; main metric still logged)
 
@@ -73,10 +71,6 @@ optimizer:
   params:
     - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
-    - params: ^(?=.*bbox_head).*$
-      lr: 7.0e-05
-    - params: ^(?=.*reg_head).*$
-      lr: 7.0e-05
 
   lr: 0.0001
   betas: [0.9, 0.999]
@@ -127,8 +121,6 @@ train_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/itodd2coco_category.yml
     coco_path: ~/Downloads/itodd/
-    need_aligned: True
-    paligned_values: {2: [0.0, 5.344601, 1.363572]}
   collate_fn:
     scales: ~
   total_batch_size: 16
@@ -149,6 +141,4 @@ val_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/itodd2coco_category.yml
     coco_path: ~/Downloads/itodd/
-    need_aligned: True
-    paligned_values: {2: [0.0, 5.344601, 1.363572]}
   total_batch_size: 1

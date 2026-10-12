@@ -70,7 +70,7 @@ Settings: `score_thr` 0.25, 3000 points.
 
 | Dataset | Model | AR | AR with refinement |
 |---------|-------|---:|-------------------:|
-| LM-O | RGB | 0.678 | 0.728 |
+| LM-O | RGB | 0.683 | 0.733 |
 | YCB-V | RGB | 0.782 | 0.831 |
 | T-LESS | RGB | 0.680 | 0.727 |
 | TUD-L | RGB | 0.802 | 0.895 |

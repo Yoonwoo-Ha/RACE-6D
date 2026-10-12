@@ -12,4 +12,4 @@ from ._transforms import (
 )
 from .container import Compose
 from .mosaic import Mosaic
-from ._transforms import PoseAugmentation
+from ._transforms import PoseAugmentation, PasteSurfaces

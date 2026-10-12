@@ -32,7 +32,6 @@ HybridEncoder:
   nhead: 8
   hidden_dim: 256
   depth_mult: 0.67
-  enc_act: quick_gelu
 
 RACE6DTransformer_DQE:
   feat_channels: [256, 256, 256]
@@ -44,8 +43,6 @@ RACE6DTransformer_DQE:
   vis_enc: True
   num_queries: 50
   eval_idx: -1
-  activation: quick_gelu
-  mlp_act: quick_gelu
   r_min: 0.5
   r_max: 2.0
 
@@ -72,13 +69,7 @@ optimizer:
   params:
     - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
-    - params: ^(?=.*score_head).*$
-      lr: 7.0e-05
-    - params: ^(?=.*dec_reg_head).*$
-      lr: 7.0e-05
-    - params: ^(?=.*enc_trans_head).*$
-      lr: 7.0e-05
-      
+
   lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
@@ -119,15 +110,14 @@ train_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/hb2coco_category.yml
     coco_path: ~/Downloads/hb/
-    need_aligned: False
   collate_fn:
     scales: ~
   total_batch_size: 16
 
 val_dataloader:
   dataset:
-    img_folder: ~/Downloads/hb/hb2coco_val_amodal/val2017/
-    ann_file: ~/Downloads/hb/hb2coco_val_amodal/annotations/instances_val2017.json
+    img_folder: ~/Downloads/hb/hb2coco_test_eval_amodal/val2017/
+    ann_file: ~/Downloads/hb/hb2coco_test_eval_amodal/annotations/instances_val2017.json
     transforms:
       ops:
         - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
@@ -139,5 +129,4 @@ val_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/hb2coco_category.yml
     coco_path: ~/Downloads/hb/
-    need_aligned: False
   total_batch_size: 1

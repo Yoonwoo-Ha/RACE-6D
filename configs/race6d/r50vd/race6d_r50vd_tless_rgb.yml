@@ -32,7 +32,6 @@ HybridEncoder:
   nhead: 8
   hidden_dim: 256
   depth_mult: 0.67
-  enc_act: quick_gelu
 
 RACE6DTransformer_DQE:
   feat_channels: [256, 256, 256]
@@ -44,8 +43,6 @@ RACE6DTransformer_DQE:
   vis_enc: True
   num_queries: 50
   eval_idx: -1
-  activation: quick_gelu
-  mlp_act: quick_gelu
   symmetry_override: {25: none, 26: none}
 
 RACE6DPostProcessor:
@@ -54,9 +51,9 @@ RACE6DPostProcessor:
   remap_mscoco_category: False
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
-  losses: ['mal', 'boxes', 'pose', 'keypoint']
-  alpha: 1.0
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
+  losses: ['vfl', 'boxes', 'pose', 'keypoint']
+  alpha: 0.75
   gamma_pos: 1.0
   gamma_neg: 2.0
 
@@ -82,7 +79,7 @@ lr_scheduler:
   type: FlatCosineAnnealingLR
   T_max: 54
   lr_gamma: 0.5
-  warmup_iter: 100
+  warmup_iter: 1000
   flat_epochs: 30
 
 train_dataloader:
@@ -106,12 +103,11 @@ train_dataloader:
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
       policy: {name: default}
     return_masks: True
-    return_full_masks: False
+    return_full_masks: True
     remap_mscoco_category: True
     return_depth: False
     category_file: ./configs/race6d/include/tless2coco_category.yml
     coco_path: ~/Downloads/tless/
-    need_aligned: False
   collate_fn:
     scales: ~
   total_batch_size: 16
@@ -132,5 +128,4 @@ val_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/tless2coco_category.yml
     coco_path: ~/Downloads/tless/
-    need_aligned: False
   total_batch_size: 1

@@ -8,9 +8,11 @@ __include__: [
 # YCB-V RGB stage 2 (the RGB-D stage-2 recipe without depth): fine-tunes the stage-1 weights
 # (race6d_r50vd_ycbv_rgb.yml) for 10 epochs:
 #   python tools/train.py -c configs/race6d/r50vd/race6d_r50vd_ycbv_rgb_ft.yml -t <stage-1 checkpoint> --use-amp
-# QuickGELU everywhere, pose loss 5 / gamma_pos 1.0, batch 16 over PBR + real, 20 queries.
+# GELU (encoder) / SiLU (decoder, heads), pose loss 5 / gamma_pos 1.0, batch 16 over PBR + real, 20 queries.
 output_dir: ./output/race6d_r50vd_ycbv_rgb_ft
 coco_path: ~/Downloads/ycbv/
+# Objects 19/20 are trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit_race6d
+# scripts/prepare_race6d_models.py --install_to); a top-level aligned_offsets overrides it.
 category_file: ./configs/race6d/include/ycbv2coco_category.yml
 num_classes: 21
 eval_spatial_size: [480, 640]
@@ -36,7 +38,6 @@ HybridEncoder:
   nhead: 8
   hidden_dim: 256
   depth_mult: 0.67
-  enc_act: quick_gelu
 
 RACE6DTransformer_DQE:
   feat_channels: [256, 256, 256]
@@ -48,17 +49,11 @@ RACE6DTransformer_DQE:
   vis_enc: True
   num_queries: 20
   eval_idx: -1
-  dropout: 0.0
-  activation: quick_gelu
-  mlp_act: quick_gelu
 
 RACE6DPostProcessor:
   num_top_queries: 20
   vis_enc: True
   remap_mscoco_category: False
-  # Objects 19/20 are trained in the aligned frame (sub/process_models.py shifts their meshes by -P).
-  # When cam_K is given (bop.py) the postprocessor returns their poses in the original BOP frame (t - R@P).
-  aligned_offsets: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
 
 RACE6DCriterion_addr:
   weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
@@ -88,8 +83,7 @@ optimizer:
       weight_decay: 0.
     - params: ^(?=.*backbone)(?!.*norm).*$
       lr: 0.00005
-    - params: ^(?=.*score_head).*$
-      lr: 0.00008
+
   lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
@@ -102,7 +96,6 @@ lr_scheduler:
   lr_gamma: 0.5
   warmup_iter: 1000
   flat_epochs: 5
-  group_flat_epochs: {2: 0}
 
 train_dataloader:
   dataset:
@@ -131,8 +124,6 @@ train_dataloader:
         return_depth: False
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
-        need_aligned: True
-        paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
       - type: CocoDetection
         img_folder: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/train2017/
         ann_file: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/annotations/instances_train2017.json
@@ -157,8 +148,6 @@ train_dataloader:
         return_depth: False
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
-        need_aligned: True
-        paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
   collate_fn:
     scales: ~
   total_batch_size: 16
@@ -178,7 +167,5 @@ val_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/ycbv2coco_category.yml
     coco_path: ~/Downloads/ycbv/
-    need_aligned: True
-    paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
   total_batch_size: 1
 

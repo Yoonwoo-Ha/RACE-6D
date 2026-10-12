@@ -33,7 +33,6 @@ HybridEncoder:
   nhead: 8
   hidden_dim: 256
   depth_mult: 0.67
-  enc_act: quick_gelu
 
 RACE6DTransformer_DQE:
   feat_channels: [256, 256, 256]
@@ -45,8 +44,6 @@ RACE6DTransformer_DQE:
   vis_enc: True
   num_queries: 20
   eval_idx: -1
-  activation: quick_gelu
-  mlp_act: quick_gelu
   r_min: 0.5
   r_max: 2.0
 
@@ -74,26 +71,22 @@ optimizer:
     - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
     - params: ^(?=.*score_head).*$
-      lr: 8.0e-05
+      lr: 5.0e-05
     - params: ^(?=.*bbox_head).*$
-      lr: 8.0e-05
-    - params: ^(?=.*dec_reg_head).*$
-      lr: 8.0e-05
-    - params: ^(?=.*enc_trans_head).*$
-      lr: 8.0e-05
-      
+      lr: 5.0e-05
+
   lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
 
-epoches: 60
+epoches: 100
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 54
+  T_max: 90
   lr_gamma: 0.5
   warmup_iter: 1000
-  flat_epochs: 30
+  flat_epochs: 50
 
 train_dataloader:
   dataset:

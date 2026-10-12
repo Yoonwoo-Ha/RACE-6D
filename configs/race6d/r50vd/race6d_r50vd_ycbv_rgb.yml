@@ -9,10 +9,12 @@ __include__: [
 # race6d_r50vd_ycbv_rgb_bop.yml is for inference with it.
 output_dir: ./output/race6d_r50vd_ycbv_rgb
 coco_path: ~/Downloads/ycbv/
+# Objects 19/20 are trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit_race6d
+# scripts/prepare_race6d_models.py --install_to); a top-level aligned_offsets overrides it.
 category_file: ./configs/race6d/include/ycbv2coco_category.yml
 num_classes: 21
 eval_spatial_size: [480, 640]
-print_freq: 500
+print_freq: 1000
 
 RACE6D:
   backbone: PResNet
@@ -34,7 +36,6 @@ HybridEncoder:
   nhead: 8
   hidden_dim: 256
   depth_mult: 0.67
-  enc_act: quick_gelu
 
 RACE6DTransformer_DQE:
   feat_channels: [256, 256, 256]
@@ -47,28 +48,19 @@ RACE6DTransformer_DQE:
   num_queries: 50
   # Inference/eval output layer (training always uses every layer). The leaderboard CSV of the released
   # checkpoint came from decoder layer 1; the last layer gives AR 0.768.
-  eval_idx: 1
-  dropout: 0.0
-  activation: relu
-  mlp_act: quick_gelu
-  enc_mlp_act: relu
-  dec_mlp_act: quick_gelu
+  eval_idx: -1
 
 RACE6DPostProcessor:
   num_top_queries: 50
   vis_enc: True
   remap_mscoco_category: False
-  # Objects 19/20 are trained in the aligned frame (sub/process_models.py shifts their meshes by -P).
-  # When cam_K is given (bop.py) the postprocessor returns their poses in the original BOP frame (t - R@P).
-  aligned_offsets: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
 
 RACE6DCriterion_addr:
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 20}
-  enc_weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 15}
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_keypoints: 1, loss_oks: 1, loss_cr: 0.1, loss_pose: 5}
   # pose before keypoint: the keypoint loss reuses the symmetry index chosen by the pose loss (legacy order was keypoint, pose).
   losses: ['vfl', 'boxes', 'pose', 'keypoint']
   alpha: 0.75
-  gamma_pos: 2.0
+  gamma_pos: 1.0
   gamma_neg: 2.0
 
   matcher:
@@ -90,6 +82,10 @@ optimizer:
   params:
     - params: ^(?=.*(?:norm|bn)).*$
       weight_decay: 0.
+    - params: ^(?=.*score_head).*$
+      lr: 5.0e-05
+    - params: ^(?=.*bbox_head).*$
+      lr: 5.0e-05
 
   lr: 0.0001
   betas: [0.9, 0.999]
@@ -99,10 +95,10 @@ epoches: 100
 
 lr_scheduler:
   type: FlatCosineAnnealingLR
-  T_max: 50
+  T_max: 90
   lr_gamma: 0.5
   warmup_iter: 1000
-  flat_epochs: 5
+  flat_epochs: 50
 
 train_dataloader:
   dataset:
@@ -113,6 +109,7 @@ train_dataloader:
         ann_file: ~/Downloads/ycbv/ycbv2coco_train_pbr_amodal/annotations/instances_train2017.json
         transforms:
           ops:
+            - {type: PoseAugmentation, per_instance: False, rotation_range: 20.0, zoom_range: [1.0, 1.0], p: 0.5, background_dir: ~/Downloads/VOCdevkit/VOC2012/JPEGImages/}
             - {type: FilterSmallBoxLowVis, min_size: 5, min_visib: 0.1}
             - {type: RandomCoarseDropout}
             - {type: ColorJitter}
@@ -126,13 +123,11 @@ train_dataloader:
             - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
           policy: {name: default}
         return_masks: True
-        return_full_masks: False
+        return_full_masks: True
         remap_mscoco_category: True
         return_depth: False
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
-        need_aligned: True
-        paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
       - type: CocoDetection
         img_folder: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/train2017/
         ann_file: ~/Downloads/ycbv/ycbv2coco_train_real_amodal/annotations/instances_train2017.json
@@ -157,11 +152,9 @@ train_dataloader:
         return_depth: False
         category_file: ./configs/race6d/include/ycbv2coco_category.yml
         coco_path: ~/Downloads/ycbv/
-        need_aligned: True
-        paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
   collate_fn:
     scales: ~
-  total_batch_size: 32
+  total_batch_size: 16
 
 val_dataloader:
   dataset:
@@ -178,6 +171,4 @@ val_dataloader:
     return_depth: False
     category_file: ./configs/race6d/include/ycbv2coco_category.yml
     coco_path: ~/Downloads/ycbv/
-    need_aligned: True
-    paligned_values: {19: [10.19792, -3.530759, -1.122307], 20: [-3.871881, -10.338984, 0.088532]}
   total_batch_size: 1

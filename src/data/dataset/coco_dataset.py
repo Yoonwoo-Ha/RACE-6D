@@ -18,6 +18,7 @@ from pycocotools import mask as coco_mask
 from ._dataset import DetDataset
 from .._misc import convert_to_tv_tensor, Pose
 from ...core import register
+from ...misc.aligned_frame import resolve_aligned_offsets
 
 import numpy as np
 import cv2
@@ -34,6 +35,7 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
     __inject__ = [
         "transforms",
     ]
+    __share__ = ["aligned_offsets"]
 
     def __init__(
         self,
@@ -46,8 +48,9 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         return_depth=False,
         category_file=None,
         coco_path=None,
-        need_aligned=False,
-        paligned_values=None,    # {category_id: [x, y, z] mm}: points on the symmetry axis, used with need_aligned
+        aligned_offsets=None,    # P {category_id: [x, y, z] mm}, shared config key; None: {coco_path}/p_values.json
+        need_aligned=None,       # legacy: with paligned_values, overrides aligned_offsets
+        paligned_values=None,
         depth_scale=10000,       # legacy, unused after the mm-based normalization
         depth_z_max_mm=2000.0,   # depth clip upper bound (mm); normalized to 1.0
         depth_norm="clip_zmax",  # "clip_zmax" (default) or "meters" (legacy checkpoints, e.g. YCB-V RGB-D)
@@ -69,10 +72,13 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
         self.depth_norm = depth_norm
         self.mscoco_category2name = None
         self.coco_path = os.path.expanduser(coco_path)
-        self.need_aligned = need_aligned
 
-        # Paligned values: a point on the symmetry axis per original category_id (before remap)
-        self.paligned_values = {int(k): list(v) for k, v in (paligned_values or {}).items()}
+        # P per original category_id (before remap): poses are moved to the aligned frame, t + R @ P
+        if need_aligned is None:
+            self.paligned_values = resolve_aligned_offsets(aligned_offsets, self.coco_path)
+        else:
+            self.paligned_values = resolve_aligned_offsets(paligned_values or {}) if need_aligned else {}
+        self.need_aligned = bool(self.paligned_values)
 
         # Load category mapping from YAML
         if category_file is not None and os.path.exists(category_file):
