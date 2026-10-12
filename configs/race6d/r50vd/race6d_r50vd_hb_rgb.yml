@@ -114,6 +114,8 @@ train_dataloader:
     scales: ~
   total_batch_size: 16
 
+# HB test GT is not public. Evaluate on an annotated set: the official validation split exported with
+# bop_toolkit_race6d (--dataset hb --split val -> ~/Downloads/hb/hb2coco_val_primesense_amodal/) or your own set.
 val_dataloader:
   dataset:
     img_folder: ~/Downloads/hb/hb2coco_test_eval_amodal/val2017/
