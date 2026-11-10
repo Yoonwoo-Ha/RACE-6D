@@ -1,6 +1,6 @@
 """Model-frame shift P of objects whose symmetry axis is off the model origin.
 
-Meshes, GT poses and the keypoint cache of bop_toolkit_race6d stay in the original BOP model frame. Training moves
+Meshes, GT poses and the keypoint cache of bop_toolkit stay in the original BOP model frame. Training moves
 these objects to v - P (poses t + R @ P, keypoints kp - P) and the postprocessor returns t - R @ P.
 """
 
@@ -15,7 +15,7 @@ def resolve_aligned_offsets(aligned_offsets=None, coco_path=None):
 
     aligned_offsets: a dict sets P explicitly (e.g. the P a released checkpoint was trained with); {} or 'none'
         trains every object in the original frame; None or 'auto' reads {coco_path}/p_values.json, written by
-        bop_toolkit_race6d (scripts/prepare_race6d_models.py --install_to), or no P when the file is missing.
+        bop_toolkit (scripts/prepare_race6d_models.py --install_to), or no P when the file is missing.
     """
     if isinstance(aligned_offsets, str):
         mode = aligned_offsets.lower()

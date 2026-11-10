@@ -793,7 +793,7 @@ class RACE6DTransformer_DQE(nn.Module):
     def _load_keypoints_3d_and_edges(coco_path, category2label, offsets=None):
         """32 3D keypoints per label [num_labels, 32, 3] and the edges of cached_keypoints_3d_edge.json.
 
-        A cache from bop_toolkit_race6d is in the original BOP frame (metadata.coordinate_system) and is moved by
+        A cache from bop_toolkit is in the original BOP frame (metadata.coordinate_system) and is moved by
         -P here; a legacy cache without it is used as stored (it was built in the training frame). Without the file
         (inference), the keypoints are zeros and come from the checkpoint.
         """

@@ -8,7 +8,7 @@ __include__: [
 
 output_dir: ./output/race6d_r50vd_itodd_rgb
 coco_path: ~/Downloads/itodd/
-# Object 2 is trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit_race6d
+# Object 2 is trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit
 # scripts/prepare_race6d_models.py --install_to); a top-level aligned_offsets overrides it.
 category_file: ./configs/race6d/include/itodd2coco_category.yml
 num_classes: 28

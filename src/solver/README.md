@@ -31,7 +31,7 @@ bop_eval:
   dataset: ycbv                            # BOP dataset name
   split: test
   dataset_root: ~/Downloads/ycbv           # original BOP dataset folder
-  toolkit_path: ~/Downloads/bop_toolkit_race6d  # bop_toolkit clone
+  toolkit_path: ~/Downloads/bop_toolkit  # clone of the RACE6D fork of bop_toolkit
   renderer_path: ~/Downloads/bop_renderer/build  # built bop_renderer (renderer_type: cpp)
   renderer_type: cpp                       # cpp | vispy | python
   targets_filename: test_targets_bop19.json

@@ -12,7 +12,7 @@ __include__: [
 # used 6 epochs of a T_max 80 schedule from the released stage-1 checkpoint.
 output_dir: ./output/race6d_r50vd_ycbv_rgbd_ft
 coco_path: ~/Downloads/ycbv/
-# Objects 19/20 are trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit_race6d
+# Objects 19/20 are trained in an aligned model frame. P is read from {coco_path}/p_values.json (bop_toolkit
 # scripts/prepare_race6d_models.py --install_to); a top-level aligned_offsets overrides it.
 category_file: ./configs/race6d/include/ycbv2coco_category.yml
 num_classes: 21
