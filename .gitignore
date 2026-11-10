@@ -6,6 +6,7 @@ __pycache__/
 *.egg
 dist/
 build/
+.venv/
 
 # PyTorch checkpoints & models
 *.pth
@@ -61,12 +62,12 @@ CLAUDE.md
 # Local tools and scratch files (not published)
 bop.py
 test.py
+src/misc/test_utils.py
 run_bop_tless_rgbd.py
 gen_bop_csv_driver.py
 viz_pose_video.py
 requirements-inference.txt
 .gjc/
-configs/race6d/r50vd/race6d_r50vd_itodd_rgb_nokpt_poseft.yml
 
 # Experimental backbones / encoders (not part of main model)
 src/nn/backbone/dinov3_dpt.py
