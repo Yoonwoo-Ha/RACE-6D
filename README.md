@@ -6,7 +6,7 @@
   <div align="center">
 
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c?logo=pytorch)](https://pytorch.org/)
-  [![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python)](https://www.python.org/)
+  [![Python](https://img.shields.io/badge/Python-3.10-3776ab?logo=python)](https://www.python.org/)
   [![BOP](https://img.shields.io/badge/Benchmark-BOP-orange)](https://bop.felk.cvut.cz/)
   [![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
@@ -32,26 +32,32 @@ RACE6D treats 6D pose estimation as a **set-prediction problem**. Object queries
 
 ### Dependencies
 
-**Tested environment**: Python 3.10, PyTorch 2.7.0 + CUDA 12.8
+**Tested environment**: Python 3.10, PyTorch 2.7.0 + CUDA 12.8, NumPy 2.2.6
 
-Minimum requirements:
-- Python ≥ 3.10
-- PyTorch ≥ 2.0 with CUDA
+Main requirements (pinned versions in `requirements.txt`):
+- Python 3.10
+- PyTorch 2.7.0 with CUDA 12.8
 - [PyTorch3D](https://github.com/facebookresearch/pytorch3d) — 3D rotation utilities (`rotation_6d_to_matrix`)
 - [Open3D](http://www.open3d.org/) — 3D model loading
 - [`torch_linear_assignment`](https://github.com/ivan-chai/torch-linear-assignment) — GPU-accelerated Hungarian matching
 
 ```bash
 git clone https://github.com/Yoonwoo-Ha/RACE-6D.git && cd RACE-6D
+python3.10 -m venv .venv && source .venv/bin/activate
 
-# 1) Standard pip packages (numpy, scipy, opencv, tensorboard, ...)
+# 1) PyTorch with CUDA 12.8
+pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+
+# 2) Pinned pip packages (numpy, scipy, opencv, open3d, tensorboard, BOP toolkit script dependencies, ...)
 pip install -r requirements.txt
 
-# 2) Extra packages that need custom installation
-pip install open3d
-pip install "git+https://github.com/facebookresearch/pytorch3d.git"
-pip install git+https://github.com/ivan-chai/torch-linear-assignment.git
+# 3) Extensions built against the installed PyTorch (TORCH_CUDA_ARCH_LIST selects the GPU architecture, e.g. 12.0)
+pip install setuptools wheel ninja
+pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@0a59450f0ebbe12d9a8db3de937814932517633b"
+pip install --no-build-isolation "git+https://github.com/ivan-chai/torch-linear-assignment.git"
 ```
+
+Run the tools with the interpreter of this environment (`.venv/bin/python tools/train.py ...`).
 
 > **Note**: PyTorch3D installation can be version-sensitive. If the `pip install` from GitHub fails, follow the [official PyTorch3D install guide](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md) that matches your PyTorch / CUDA combination.
 
@@ -73,6 +79,18 @@ All training data is prepared from the original BOP archives with the
 3D keypoint cache and the model-frame offsets `p_values.json` in each dataset folder
 (`scripts/prepare_race6d_models.py --install_to`). The toolkit expects raw datasets under `~/Downloads/<dataset>/` by
 default; the guide explains how to use a different location.
+
+BOP19 evaluation (`bop_eval` in a config) runs the toolkit scripts from a clone of the fork and uses the C++
+[bop_renderer](https://github.com/thodan/bop_renderer). Their default locations are `~/Downloads/bop_toolkit` and
+`~/Downloads/bop_renderer/build`; set `bop_eval.toolkit_path` and `bop_eval.renderer_path` for other folders
+(see [src/solver/README.md](src/solver/README.md)).
+
+```bash
+git clone --branch race6d-data https://github.com/Yoonwoo-Ha/bop_toolkit.git ~/Downloads/bop_toolkit
+git clone https://github.com/thodan/bop_renderer.git ~/Downloads/bop_renderer
+cd ~/Downloads/bop_renderer   # needs OSMesa and LLVM, see its README
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build
+```
 
 Update the dataset paths in `configs/race6d/r50vd/race6d_r50vd_{dataset}_*.yml` to match your local layout. For
 training, the dataset folder (`coco_path`) must contain the original `models/` (with `models_info.json`),
@@ -261,7 +279,7 @@ off by default); see [src/zoo/race6d/depth_refine.md](src/zoo/race6d/depth_refin
 |-----|-------|--------|
 | `rot_repr` | top level (shared by decoder, criterion, matcher and postprocessor) | `ego` (default, released checkpoints): the network regresses the camera-frame rotation. `allo`: it regresses the allocentric rotation, converted to egocentric with the translation direction (GT in training, prediction at inference). |
 | `depth_norm` | RGB-D dataset | `clip_zmax` (default) or `meters` |
-| `aligned_offsets` | top level (shared by decoder, dataset and postprocessor) | P `{category_id: [x, y, z]}` in mm of the objects trained in a shifted model frame (YCB-V 19/20, ITODD 2): model points and keypoints `-P`, GT poses `t + R @ P`, BOP output `t - R @ P`. Unset (default): read from `{coco_path}/p_values.json` (bop_toolkit_race6d `prepare_race6d_models.py --install_to`); `none`: no shift. P is saved in the checkpoint with the 3D keypoints, and evaluation uses the saved value (`postprocessor.use_model_offsets`); checkpoints without it use this setting |
+| `aligned_offsets` | top level (shared by decoder, dataset and postprocessor) | P `{category_id: [x, y, z]}` in mm of the objects trained in a shifted model frame (YCB-V 19/20, ITODD 2): model points and keypoints `-P`, GT poses `t + R @ P`, BOP output `t - R @ P`. Unset (default): read from `{coco_path}/p_values.json` (bop_toolkit `prepare_race6d_models.py --install_to`); `none`: no shift. P is saved in the checkpoint with the 3D keypoints, and evaluation uses the saved value (`postprocessor.use_model_offsets`); checkpoints without it use this setting |
 | `iou_threshold` | `HungarianMatcher` | drops matched pairs whose box IoU is below it (`0`, the default, keeps all) |
 | `eval_idx` | `RACE6DTransformer_DQE` | decoder layer used at inference (`-1` = last), also with `vis_enc: True` |
 | `depth_refine` | `RACE6DPostProcessor` | test-time depth refinement of the translation, see [depth_refine.md](src/zoo/race6d/depth_refine.md) (off by default) |
@@ -282,6 +300,7 @@ To overlay the epoch curves of several runs, use `plot_logs_vs` in `src/misc/plo
 ### 5. Export & profile
 
 ```bash
+pip install onnx==1.21.0 onnxsim==0.6.3 onnxruntime==1.23.2   # export only
 python tools/export_onnx.py -c config.yml -r checkpoint.pth --check
 python tools/run_profile.py -c config.yml
 ```

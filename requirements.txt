@@ -1,15 +1,36 @@
-torch>=2.0
-torchvision
-numpy
-scipy
-scikit-learn
-opencv-python
-Pillow
-matplotlib
-pandas
-seaborn
-PyYAML
-tensorboard
-pycocotools
-packaging
-sympy
+# Tested with Python 3.10 and CUDA 12.8. Install PyTorch from the CUDA index first:
+#   pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+# PyTorch3D and torch-linear-assignment are built against that PyTorch (see README).
+torch==2.7.0
+torchvision==0.22.0
+numpy==2.2.6
+scipy==1.15.3
+scikit-learn==1.7.2
+opencv-python==4.11.0.86
+Pillow==12.3.0
+matplotlib==3.10.9
+pandas==2.3.3
+seaborn==0.13.2
+PyYAML==6.0.3
+tensorboard==2.20.0
+pycocotools==2.0.11
+packaging==26.3
+sympy==1.14.0
+timm==1.0.19
+rich==15.0.0
+defusedxml==0.7.1
+open3d==0.19.0
+
+# BOP toolkit data preparation (scripts/prepare_race6d_models.py)
+trimesh==5.2.0
+plyfile==1.1.5
+
+# BOP toolkit evaluation scripts (bop_eval)
+imageio==2.38.0
+pypng==0.20220715.0
+pytz==2026.6
+scikit-image==0.25.2
+tqdm==4.70.1
+
+# Optional, for tools/export_onnx.py (--check needs onnx, --simplify onnxsim):
+#   pip install onnx==1.21.0 onnxsim==0.6.3 onnxruntime==1.23.2
