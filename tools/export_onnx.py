@@ -43,9 +43,15 @@ def main(args, ):
 
     model = Model()
 
-    data = torch.rand(1, 3, 640, 640)
-    size = torch.tensor([[640, 640]])
-    _ = model(data, size)
+    # The dummy input must match the config: pos-embed/anchors are precomputed for
+    # eval_spatial_size [h, w], and RGB-D backbones take 4 input channels.
+    h, w = cfg.yaml_cfg.get('eval_spatial_size', [640, 640])
+    in_chans = next(m for m in model.model.backbone.modules() if isinstance(m, nn.Conv2d)).in_channels
+    data = torch.rand(1, in_chans, h, w)
+    size = torch.tensor([[w, h]])  # orig_target_sizes is [W, H]
+    outputs = model(data, size)
+    # Deploy-mode postprocessor returns 5 tensors when the model has pose heads, else 3.
+    output_names = ['labels', 'boxes', 'scores', 'rotations', 'translations'][:len(outputs)]
 
     dynamic_axes = {
         'images': {0: 'N', },
@@ -57,7 +63,7 @@ def main(args, ):
         (data, size), 
         args.output_file,
         input_names=['images', 'orig_target_sizes'],
-        output_names=['labels', 'boxes', 'scores'],
+        output_names=output_names,
         dynamic_axes=dynamic_axes,
         opset_version=16, 
         verbose=False,
@@ -73,11 +79,11 @@ def main(args, ):
     if args.simplify:
         import onnx 
         import onnxsim
-        dynamic = True 
-        # input_shapes = {'images': [1, 3, 640, 640], 'orig_target_sizes': [1, 2]} if dynamic else None
-        input_shapes = {'images': data.shape, 'orig_target_sizes': size.shape} if dynamic else None
-        onnx_model_simplify, check = onnxsim.simplify(args.file_name, input_shapes=input_shapes, dynamic_input_shape=dynamic)
-        onnx.save(onnx_model_simplify, args.file_name)
+        # test_input_shapes only feeds onnxsim's check; overwrite_input_shapes (what the
+        # deprecated input_shapes maps to) would pin the dynamic batch axis N to 1.
+        test_input_shapes = {'images': list(data.shape), 'orig_target_sizes': list(size.shape)}
+        onnx_model_simplify, check = onnxsim.simplify(args.output_file, test_input_shapes=test_input_shapes)
+        onnx.save(onnx_model_simplify, args.output_file)
         print(f'Simplify onnx model {check}...')
 
 
