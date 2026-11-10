@@ -2883,7 +2883,7 @@ class DepthAugment(nn.Module):
         H, W = depth.shape
         keep = float(rng.uniform(*self.edge_keep_frac))
         seg = self._smooth_field((H, W), self.edge_segment_sigma, rng)
-        seeds = step & (seg > np.quantile(seg, 1.0 - keep))
+        seeds = step & (seg > np.quantile(seg.astype(np.float64), 1.0 - keep))
         if not seeds.any():
             return depth
         width = np.exp(np.log(self.edge_width_median) + self.edge_width_sigma * self._smooth_field((H, W), self.edge_segment_sigma, rng))
@@ -2915,7 +2915,7 @@ class DepthAugment(nn.Module):
         if not dark.any():
             return depth
         f = self._smooth_field(depth.shape, 4.0, rng)
-        holes = dark & (f > np.quantile(f, 1.0 - self.dark_keep_frac))
+        holes = dark & (f > np.quantile(f.astype(np.float64), 1.0 - self.dark_keep_frac))
         depth = depth.copy()
         depth[holes] = 0.0
         return depth
@@ -2943,7 +2943,7 @@ class DepthAugment(nn.Module):
         valid = depth > 0
         if not valid.any():
             return depth
-        thr = np.quantile(score[valid], 1.0 - min(frac, 0.95))
+        thr = np.quantile(score[valid].astype(np.float64), 1.0 - min(frac, 0.95))
         depth = depth.copy()
         depth[(score >= thr) & valid] = 0.0
         return depth
